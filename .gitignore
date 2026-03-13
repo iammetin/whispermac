@@ -1,0 +1,16 @@
+# Whisper-Modell (zu groß für Git)
+models/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build-Ausgaben
+dist/
+build/
+
+# macOS
+.DS_Store
+*.log
