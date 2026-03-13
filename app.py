@@ -41,14 +41,14 @@ from permissions import ensure_permissions
 from recorder import AudioRecorder
 from transcriber import Transcriber
 
-# Modell-Pfad: funktioniert sowohl als Skript als auch als gebaute .app
+# Pfade: funktioniert sowohl als Skript als auch als gebaute .app
 if getattr(sys, "frozen", False):
-    # Läuft als .app-Bundle → Modell liegt in ~/WhisperMac/models/
-    MODEL_PATH = os.path.expanduser("~/WhisperMac/models/whisper-large-v3-turbo")
+    MODEL_PATH    = os.path.expanduser("~/WhisperMac/models/whisper-large-v3-turbo")
+    MENUBAR_ICON  = os.path.expanduser("~/WhisperMac/Assets/menubar.png")
 else:
-    # Läuft als Skript (Entwicklung)
-    BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-    MODEL_PATH = os.path.join(BASE_DIR, "models", "whisper-large-v3-turbo")
+    BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+    MODEL_PATH    = os.path.join(BASE_DIR, "models", "whisper-large-v3-turbo")
+    MENUBAR_ICON  = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
 FN_FLAG = kCGEventFlagMaskSecondaryFn   # 0x800000
 
@@ -56,7 +56,9 @@ FN_FLAG = kCGEventFlagMaskSecondaryFn   # 0x800000
 class WhisperMacApp(rumps.App):
 
     def __init__(self):
-        super().__init__("◌", quit_button=None)
+        super().__init__("", quit_button=None)
+        self.icon     = MENUBAR_ICON
+        self.template = True   # passt sich Dark/Light Mode an
 
         self.recorder     = AudioRecorder()
         self.transcriber  = Transcriber(MODEL_PATH)
@@ -101,15 +103,13 @@ class WhisperMacApp(rumps.App):
         # Overlay-Fenster vorbauen damit es sofort erscheint
         self.overlay.prebuild()
         self.transcriber.preload()
-        self._set_ui(title="⬤", status="Bereit – fn halten zum Aufnehmen")
+        self._set_ui(status="Bereit – fn halten zum Aufnehmen")
         self._start_fn_listener()
 
     # ── UI-Update (thread-safe) ───────────────────────────────────────────
 
-    def _set_ui(self, title=None, status=None):
+    def _set_ui(self, status=None):
         def _update():
-            if title is not None:
-                self.title = title
             if status is not None:
                 self._status_item.title = status
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_update)
@@ -148,7 +148,7 @@ class WhisperMacApp(rumps.App):
                 "→  Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen\n"
                 "→  Terminal (oder deine App) hinzufügen und neu starten.\n"
             )
-            self._set_ui(title="⚠", status="⚠ Berechtigung fehlt – siehe Terminal")
+            self._set_ui(status="⚠ Berechtigung fehlt – siehe Terminal")
             return
 
         source = CFMachPortCreateRunLoopSource(None, tap, 0)
@@ -162,7 +162,6 @@ class WhisperMacApp(rumps.App):
         if self._is_recording:
             return
         self._is_recording = True
-        self.title = "🔴"
         self._status_item.title = "Aufnahme läuft…"
         self.recorder.start()
         self.overlay.show(lambda: self.recorder.current_level)
@@ -171,7 +170,6 @@ class WhisperMacApp(rumps.App):
         if not self._is_recording:
             return
         self.overlay.hide()
-        self.title = "◌"
         self._status_item.title = "Transkribiere…"
         threading.Thread(target=self._transcribe_and_insert, daemon=True).start()
 
@@ -181,7 +179,7 @@ class WhisperMacApp(rumps.App):
 
         # Zu kurze Aufnahme ignorieren (< 0.3 s)
         if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.3):
-            self._set_ui(title="⬤", status="Bereit – fn halten zum Aufnehmen")
+            self._set_ui(status="Bereit – fn halten zum Aufnehmen")
             return
 
         text = self.transcriber.transcribe(audio, language=self.language)
@@ -189,7 +187,7 @@ class WhisperMacApp(rumps.App):
         if text:
             self._insert_text(text)
 
-        self._set_ui(title="⬤", status="Bereit – fn halten zum Aufnehmen")
+        self._set_ui(status="Bereit – fn halten zum Aufnehmen")
 
     # ── Text einfügen ─────────────────────────────────────────────────────
 
