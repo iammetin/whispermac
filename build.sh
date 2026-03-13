@@ -42,11 +42,16 @@ cat > "$APP_OUT/Contents/Info.plist" << EOF
     <string>WhisperMac benötigt Mikrofonzugriff für Sprachaufnahmen.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>WhisperMac benötigt diese Berechtigung zum Einfügen von Text.</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
 </plist>
 EOF
+
+# ── App-Icon kopieren ─────────────────────────────────────────────────────
+cp "$SCRIPT_DIR/Assets/AppIcon.icns" "$APP_OUT/Contents/Resources/AppIcon.icns"
 
 # ── C-Launcher kompilieren (echtes Binary = kein Python-im-Dock Problem) ─
 PYTHON_FW="/opt/homebrew/opt/python@3.11/Frameworks/Python.framework/Versions/3.11"
