@@ -78,10 +78,19 @@ class WhisperMacApp(rumps.App):
             rumps.MenuItem("Beenden", callback=rumps.quit_application),
         ]
 
+        # Dock-Icon aktivieren (rumps setzt Accessory – wir überschreiben kurz danach)
+        rumps.Timer(self._show_dock_icon, 0.2).start()
+
         # Erst Berechtigungen prüfen, dann Modell laden
         ensure_permissions(self._on_permissions_granted)
 
     # ── Modell laden ──────────────────────────────────────────────────────
+
+    def _show_dock_icon(self, timer):
+        AppKit.NSApplication.sharedApplication().setActivationPolicy_(
+            AppKit.NSApplicationActivationPolicyRegular
+        )
+        timer.stop()
 
     def _on_permissions_granted(self):
         threading.Thread(target=self._preload_model, daemon=True).start()
