@@ -103,11 +103,20 @@ class RecordingOverlay:
         """Fenster einmalig erstellen und versteckt halten – kein Aufbau-Delay beim Drücken."""
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._build_window)
 
+    def _screen_with_cursor(self):
+        """Gibt den Bildschirm zurück, auf dem der Cursor gerade ist."""
+        mouse = AppKit.NSEvent.mouseLocation()
+        for screen in NSScreen.screens():
+            if AppKit.NSPointInRect(mouse, screen.frame()):
+                return screen
+        return NSScreen.mainScreen()
+
     def _build_window(self):
-        screen = NSScreen.mainScreen()
+        screen = self._screen_with_cursor()
         sw = screen.frame().size.width
-        x  = (sw - OVERLAY_WIDTH) / 2.0
-        y  = 32.0
+        sx = screen.frame().origin.x
+        x  = sx + (sw - OVERLAY_WIDTH) / 2.0
+        y  = screen.frame().origin.y + 32.0
 
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(x, y, OVERLAY_WIDTH, OVERLAY_HEIGHT),
@@ -159,10 +168,12 @@ class RecordingOverlay:
         if self._window is None:
             self._build_window()   # Fallback falls prebuild nicht aufgerufen wurde
 
-        screen = NSScreen.mainScreen()
+        screen = self._screen_with_cursor()
         sw = screen.frame().size.width
-        x  = (sw - OVERLAY_WIDTH) / 2.0
-        self._window.setFrameOrigin_(AppKit.NSMakePoint(x, 32.0))
+        sx = screen.frame().origin.x
+        x  = sx + (sw - OVERLAY_WIDTH) / 2.0
+        y  = screen.frame().origin.y + 32.0
+        self._window.setFrameOrigin_(AppKit.NSMakePoint(x, y))
         self._window.orderFront_(None)
 
         threading.Thread(target=self._animate_loop, daemon=True).start()
