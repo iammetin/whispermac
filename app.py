@@ -50,7 +50,17 @@ else:
     MODEL_PATH    = os.path.join(BASE_DIR, "models", "whisper-large-v3-turbo")
     MENUBAR_ICON  = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
-FN_FLAG = kCGEventFlagMaskSecondaryFn   # 0x800000
+FN_FLAG      = kCGEventFlagMaskSecondaryFn   # 0x800000
+HISTORY_MAX  = 5
+LANG_OPTIONS = [
+    (None, "Auto"),
+    ("de", "Deutsch"),
+    ("en", "English"),
+    ("tr", "Türkçe"),
+    ("fr", "Français"),
+    ("es", "Español"),
+    ("it", "Italiano"),
+]
 
 
 class WhisperMacApp(rumps.App):
@@ -60,27 +70,51 @@ class WhisperMacApp(rumps.App):
         self.icon     = MENUBAR_ICON
         self.template = True   # passt sich Dark/Light Mode an
 
-        self.recorder     = AudioRecorder()
-        self.transcriber  = Transcriber(MODEL_PATH)
-        self.overlay      = RecordingOverlay()
+        self.recorder    = AudioRecorder()
+        self.transcriber = Transcriber(MODEL_PATH)
+        self.overlay     = RecordingOverlay()
 
         self._is_recording = False
         self._fn_pressed   = False
         self.language      = None
+        self._history      = []   # letzte Transkriptionen (neueste zuerst)
 
+        # ── Status-Zeile ──────────────────────────────────────────────────
         self._status_item = rumps.MenuItem("Lade Modell…")
         self._status_item.set_callback(None)
-        self._lang_item = rumps.MenuItem("Sprache: Auto", callback=self._cycle_language)
 
-        self.menu = [
-            self._status_item,
-            None,
-            self._lang_item,
-            None,
-            rumps.MenuItem("Beenden", callback=rumps.quit_application),
+        # ── Verlauf (letzte 5 Transkriptionen) ────────────────────────────
+        self._hist_header = rumps.MenuItem("Zuletzt transkribiert:")
+        self._hist_header.set_callback(None)
+        self._history_items = [
+            rumps.MenuItem("", callback=self._on_history_click)
+            for _ in range(HISTORY_MAX)
         ]
 
-        # Dock-Icon aktivieren (rumps setzt Accessory – wir überschreiben kurz danach)
+        # ── Sprache-Untermenü ─────────────────────────────────────────────
+        self._lang_submenu    = rumps.MenuItem("Sprache")
+        self._lang_menu_items = {}
+        for code, label in LANG_OPTIONS:
+            item = rumps.MenuItem(label, callback=self._on_lang_select)
+            self._lang_submenu[label] = item
+            self._lang_menu_items[code] = item
+
+        # ── Menü zusammenbauen ────────────────────────────────────────────
+        menu = [self._status_item, None, self._hist_header]
+        menu.extend(self._history_items)
+        menu.extend([None, self._lang_submenu, None,
+                     rumps.MenuItem("Beenden", callback=rumps.quit_application)])
+        self.menu = menu
+
+        # Verlauf initial ausblenden
+        self._hist_header._menuitem.setHidden_(True)
+        for item in self._history_items:
+            item._menuitem.setHidden_(True)
+
+        # Häkchen bei "Auto" setzen
+        self._lang_menu_items[None]._menuitem.setState_(1)   # NSOnState
+
+        # Dock-Icon aktivieren
         rumps.Timer(self._show_dock_icon, 0.2).start()
 
         # Erst Berechtigungen prüfen, dann Modell laden
@@ -98,9 +132,7 @@ class WhisperMacApp(rumps.App):
         threading.Thread(target=self._preload_model, daemon=True).start()
 
     def _preload_model(self):
-        # Audio-Subsystem vorwärmen (eliminiert Verzögerung beim ersten Start)
         self.recorder.warmup()
-        # Overlay-Fenster vorbauen damit es sofort erscheint
         self.overlay.prebuild()
         self.transcriber.preload()
         self._set_ui(status="Bereit – fn halten zum Aufnehmen")
@@ -124,7 +156,6 @@ class WhisperMacApp(rumps.App):
 
                 if fn_down and not self._fn_pressed:
                     self._fn_pressed = True
-                    # Callback läuft bereits auf dem Main-Thread → direkt aufrufen
                     self._on_fn_press()
                 elif not fn_down and self._fn_pressed:
                     self._fn_pressed = False
@@ -177,7 +208,6 @@ class WhisperMacApp(rumps.App):
         audio = self.recorder.stop()
         self._is_recording = False
 
-        # Zu kurze Aufnahme ignorieren (< 0.3 s)
         if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.3):
             self._set_ui(status="Bereit – fn halten zum Aufnehmen")
             return
@@ -185,7 +215,8 @@ class WhisperMacApp(rumps.App):
         text = self.transcriber.transcribe(audio, language=self.language)
 
         if text:
-            self._insert_text(text)
+            self._insert_text(text + " ")
+            self._add_to_history(text)
 
         self._set_ui(status="Bereit – fn halten zum Aufnehmen")
 
@@ -193,45 +224,59 @@ class WhisperMacApp(rumps.App):
 
     def _insert_text(self, text: str):
         pb = AppKit.NSPasteboard.generalPasteboard()
-
-        # Alten Clipboard-Inhalt sichern
         old_text = pb.stringForType_(AppKit.NSPasteboardTypeString)
 
-        # Neuen Text in Clipboard
         pb.clearContents()
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
 
-        # Kurz warten, dann Cmd+V senden
         time.sleep(0.05)
         subprocess.run([
             "osascript", "-e",
             'tell application "System Events" to keystroke "v" using command down',
         ])
 
-        # Alten Inhalt wiederherstellen
         if old_text:
             time.sleep(0.35)
             pb.clearContents()
             pb.setString_forType_(old_text, AppKit.NSPasteboardTypeString)
 
-    # ── Sprache wechseln ──────────────────────────────────────────────────
+    # ── Verlauf ───────────────────────────────────────────────────────────
 
-    def _cycle_language(self, sender):
-        options = [
-            (None,  "Auto"),
-            ("de",  "Deutsch"),
-            ("en",  "English"),
-            ("tr",  "Türkçe"),
-            ("fr",  "Français"),
-            ("es",  "Español"),
-            ("it",  "Italiano"),
-        ]
-        codes  = [o[0] for o in options]
-        labels = [o[1] for o in options]
-        idx      = codes.index(self.language) if self.language in codes else 0
-        next_idx = (idx + 1) % len(options)
-        self.language = codes[next_idx]
-        self._lang_item.title = f"Sprache: {labels[next_idx]}"
+    def _add_to_history(self, text: str):
+        self._history.insert(0, text)
+        if len(self._history) > HISTORY_MAX:
+            self._history = self._history[:HISTORY_MAX]
+
+        def _update():
+            self._hist_header._menuitem.setHidden_(False)
+            for i, item in enumerate(self._history_items):
+                if i < len(self._history):
+                    full  = self._history[i]
+                    short = (full[:55] + "…") if len(full) > 55 else full
+                    item.title      = short
+                    item._full_text = full
+                    item._menuitem.setHidden_(False)
+                else:
+                    item._menuitem.setHidden_(True)
+
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_update)
+
+    def _on_history_click(self, sender):
+        text = getattr(sender, "_full_text", sender.title)
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+
+    # ── Sprache ───────────────────────────────────────────────────────────
+
+    def _on_lang_select(self, sender):
+        for code, label in LANG_OPTIONS:
+            self._lang_menu_items[code]._menuitem.setState_(0)
+        for code, label in LANG_OPTIONS:
+            if sender.title == label:
+                self.language = code
+                self._lang_menu_items[code]._menuitem.setState_(1)
+                break
 
 
 if __name__ == "__main__":
