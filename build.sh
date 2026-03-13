@@ -104,11 +104,13 @@ clang /tmp/whispermac_launcher.c \
 echo "🔏 Signiere App..."
 codesign --force --deep --sign - "$APP_OUT"
 
+# ── Direkt nach /Applications installieren ───────────────────────────────
+echo "📲 Installiere nach /Applications..."
+rm -rf "/Applications/$APP_NAME.app"
+cp -r "$APP_OUT" "/Applications/"
+
 echo ""
-echo "✅ Fertig! App liegt in: dist/WhisperMac.app"
-echo ""
-echo "Zum Installieren:"
-echo "  cp -r dist/WhisperMac.app /Applications/"
+echo "✅ Fertig! WhisperMac.app ist in /Applications installiert."
 echo ""
 echo "Beim ersten Start → Systemeinstellungen:"
 echo "  Datenschutz & Sicherheit → Mikrofon → WhisperMac ✓"
