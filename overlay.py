@@ -1,6 +1,7 @@
 """
 Modernes Wellenform-Overlay für WhisperMac.
 Pill-Shape mit Frosted-Glass-Effekt, organischer Wellenform und Aufnahme-Indikator.
+Das Fenster wird beim Start vorgebaut und nur noch gezeigt/versteckt.
 """
 import math
 import threading
@@ -32,13 +33,13 @@ class WaveformView(NSView):
         self = objc.super(WaveformView, self).initWithFrame_(frame)
         if self is None:
             return None
-        self._level = 0.0
-        self._phase = 0.0
+        self._level     = 0.0
+        self._phase     = 0.0
         self._dot_phase = 0.0
         return self
 
-    def setLevel_(self, v):   self._level = v
-    def setPhase_(self, v):   self._phase = v
+    def setLevel_(self, v):    self._level = v
+    def setPhase_(self, v):    self._phase = v
     def setDotPhase_(self, v): self._dot_phase = v
 
     def isFlipped(self): return False
@@ -47,16 +48,15 @@ class WaveformView(NSView):
         NSColor.clearColor().set()
         AppKit.NSRectFill(rect)
 
-        w      = rect.size.width
-        h      = rect.size.height
-        mid_y  = h / 2.0
+        w     = rect.size.width
+        h     = rect.size.height
+        mid_y = h / 2.0
 
-        # ── Aufnahme-Punkt (pulsierender roter Kreis) ─────────────────────
-        pulse    = math.sin(self._dot_phase) * 0.25 + 0.75   # 0.5 … 1.0
-        dot_r    = DOT_RADIUS * pulse
-        dot_x    = 18.0
-        dot_col  = NSColor.systemRedColor().colorWithAlphaComponent_(0.92)
-        dot_col.set()
+        # ── Pulsierender Aufnahme-Punkt ───────────────────────────────────
+        pulse   = math.sin(self._dot_phase) * 0.25 + 0.75
+        dot_r   = DOT_RADIUS * pulse
+        dot_x   = 18.0
+        NSColor.systemRedColor().colorWithAlphaComponent_(0.92).set()
         dot_rect = NSMakeRect(dot_x - dot_r, mid_y - dot_r, dot_r * 2, dot_r * 2)
         NSBezierPath.bezierPathWithOvalInRect_(dot_rect).fill()
 
@@ -65,24 +65,19 @@ class WaveformView(NSView):
         bar_area  = w - bar_start - 10.0
         step      = bar_area / BAR_COUNT
 
-        # Farbe: weiß, leicht transparent
         NSColor.colorWithRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.88).set()
 
         for i in range(BAR_COUNT):
             x = bar_start + i * step + (step - BAR_W) / 2.0
 
-            # Organische Welle aus 3 überlagerten Sinuswellen
             t  = self._phase
             w1 = math.sin(t * 1.3 + i * 0.55)
             w2 = math.sin(t * 0.7 + i * 0.30) * 0.6
             w3 = math.sin(t * 2.1 + i * 0.80) * 0.3
-            wave = ((w1 + w2 + w3) / 1.9) * 0.5 + 0.5   # 0 … 1
+            wave = ((w1 + w2 + w3) / 1.9) * 0.5 + 0.5
 
-            min_h = 2.5
-            max_h = h * 0.78
-            # Begrenzter Mindestpegel damit es nie komplett flach wird
             effective = max(self._level, 0.06)
-            bar_h = min_h + wave * effective * (max_h - min_h)
+            bar_h     = 2.5 + wave * effective * (h * 0.78 - 2.5)
 
             bar_rect = NSMakeRect(x, mid_y - bar_h / 2.0, BAR_W, bar_h)
             path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
@@ -94,43 +89,28 @@ class WaveformView(NSView):
 class RecordingOverlay:
 
     def __init__(self):
-        self._window   = None
-        self._waveview = None
-        self._running  = False
-        self._phase    = 0.0
+        self._window    = None
+        self._waveview  = None
+        self._running   = False
+        self._phase     = 0.0
         self._dot_phase = 0.0
-        self._level    = 0.0
+        self._level     = 0.0
         self._get_level = None
 
-    # ── public API ────────────────────────────────────────────────────────
+    # ── Vorbau beim App-Start (Main-Thread) ───────────────────────────────
 
-    def show(self, get_level_fn):
-        if self._running:
-            return
-        self._running    = True
-        self._get_level  = get_level_fn
-        self._dispatch(self._show_impl)
-        threading.Thread(target=self._animate_loop, daemon=True).start()
+    def prebuild(self):
+        """Fenster einmalig erstellen und versteckt halten – kein Aufbau-Delay beim Drücken."""
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._build_window)
 
-    def hide(self):
-        self._running = False
-        self._dispatch(self._hide_impl)
-
-    # ── main-thread helpers ───────────────────────────────────────────────
-
-    def _dispatch(self, fn):
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(fn)
-
-    def _show_impl(self):
+    def _build_window(self):
         screen = NSScreen.mainScreen()
         sw = screen.frame().size.width
-
-        x     = (sw - OVERLAY_WIDTH) / 2.0
-        y     = 32.0
-        frame = NSMakeRect(x, y, OVERLAY_WIDTH, OVERLAY_HEIGHT)
+        x  = (sw - OVERLAY_WIDTH) / 2.0
+        y  = 32.0
 
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            frame,
+            NSMakeRect(x, y, OVERLAY_WIDTH, OVERLAY_HEIGHT),
             NSWindowStyleMaskBorderless,
             NSBackingStoreBuffered,
             False,
@@ -145,44 +125,55 @@ class RecordingOverlay:
             AppKit.NSWindowCollectionBehaviorStationary
         )
 
-        # ── Frosted-Glass Hintergrund (NSVisualEffectView) ────────────────
         radius = OVERLAY_HEIGHT / 2.0
         fx = AppKit.NSVisualEffectView.alloc().initWithFrame_(
             NSMakeRect(0, 0, OVERLAY_WIDTH, OVERLAY_HEIGHT)
         )
-        fx.setMaterial_(13)   # NSVisualEffectMaterialHUDWindow  → dunkles Glas
-        fx.setBlendingMode_(0)  # BehindWindow
-        fx.setState_(1)         # Active
+        fx.setMaterial_(13)   # HUDWindow – dunkles Glas
+        fx.setBlendingMode_(0)
+        fx.setState_(1)
         fx.setWantsLayer_(True)
         fx.layer().setCornerRadius_(radius)
         fx.layer().setMasksToBounds_(True)
-
         win.setContentView_(fx)
 
-        # ── Wellenform-View ───────────────────────────────────────────────
         wv = WaveformView.alloc().initWithFrame_(
             NSMakeRect(0, 0, OVERLAY_WIDTH, OVERLAY_HEIGHT)
         )
         fx.addSubview_(wv)
 
-        self._window   = win
+        self._window  = win
         self._waveview = wv
-        win.orderFront_(None)
+        # Fenster bleibt versteckt bis show() aufgerufen wird
 
-    def _hide_impl(self):
+    # ── public API (immer vom Main-Thread aufrufen) ───────────────────────
+
+    def show(self, get_level_fn):
+        """Sofortige Anzeige – kein Dispatch, kein Window-Aufbau."""
+        if self._running:
+            return
+        self._running   = True
+        self._get_level = get_level_fn
+
+        # Fenster positionieren und anzeigen (sofort, kein Dispatch nötig)
+        if self._window is None:
+            self._build_window()   # Fallback falls prebuild nicht aufgerufen wurde
+
+        screen = NSScreen.mainScreen()
+        sw = screen.frame().size.width
+        x  = (sw - OVERLAY_WIDTH) / 2.0
+        self._window.setFrameOrigin_(AppKit.NSMakePoint(x, 32.0))
+        self._window.orderFront_(None)
+
+        threading.Thread(target=self._animate_loop, daemon=True).start()
+
+    def hide(self):
+        """Sofortiges Verstecken – Fenster bleibt im Speicher für nächste Nutzung."""
+        self._running = False
         if self._window:
             self._window.orderOut_(None)
-            self._window   = None
-            self._waveview = None
 
-    def _redraw_impl(self):
-        if self._waveview:
-            self._waveview.setLevel_(self._level)
-            self._waveview.setPhase_(self._phase)
-            self._waveview.setDotPhase_(self._dot_phase)
-            self._waveview.setNeedsDisplay_(True)
-
-    # ── Animation-Loop (Hintergrund-Thread) ───────────────────────────────
+    # ── Animation-Loop (Hintergrund-Thread) ──────────────────────────────
 
     def _animate_loop(self):
         while self._running:
@@ -190,5 +181,17 @@ class RecordingOverlay:
                 self._level = self._get_level()
             self._phase     += 0.14
             self._dot_phase += 0.12
-            self._dispatch(self._redraw_impl)
-            time.sleep(0.04)   # ~25 fps – flüssig aber sparsam
+
+            lv = self._level
+            ph = self._phase
+            dp = self._dot_phase
+
+            def _redraw(l=lv, p=ph, d=dp):
+                if self._waveview:
+                    self._waveview.setLevel_(l)
+                    self._waveview.setPhase_(p)
+                    self._waveview.setDotPhase_(d)
+                    self._waveview.setNeedsDisplay_(True)
+
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_redraw)
+            time.sleep(0.04)

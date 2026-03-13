@@ -87,6 +87,10 @@ class WhisperMacApp(rumps.App):
         threading.Thread(target=self._preload_model, daemon=True).start()
 
     def _preload_model(self):
+        # Audio-Subsystem vorwärmen (eliminiert Verzögerung beim ersten Start)
+        self.recorder.warmup()
+        # Overlay-Fenster vorbauen damit es sofort erscheint
+        self.overlay.prebuild()
         self.transcriber.preload()
         self._set_ui(title="⬤", status="Bereit – fn halten zum Aufnehmen")
         self._start_fn_listener()
@@ -111,14 +115,11 @@ class WhisperMacApp(rumps.App):
 
                 if fn_down and not self._fn_pressed:
                     self._fn_pressed = True
-                    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
-                        self._on_fn_press
-                    )
+                    # Callback läuft bereits auf dem Main-Thread → direkt aufrufen
+                    self._on_fn_press()
                 elif not fn_down and self._fn_pressed:
                     self._fn_pressed = False
-                    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
-                        self._on_fn_release
-                    )
+                    self._on_fn_release()
             except Exception as e:
                 print(f"fn-Listener Fehler: {e}")
             return event
