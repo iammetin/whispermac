@@ -29,7 +29,21 @@ def apply_shortcuts(text: str, shortcuts: dict) -> str:
         replacement = shortcuts[word]
         if word:
             text = re.sub(re.escape(word), replacement, text, flags=re.IGNORECASE)
-    return _clean_duplicate_punctuation(text)
+    text = _clean_duplicate_punctuation(text)
+    text = _capitalize_after_punctuation(text)
+    return text
+
+
+def _capitalize_after_punctuation(text: str) -> str:
+    """Großschreibung nach Satzzeichen, die durch Kürzel entstanden sind.
+    Whisper kennt das Kürzel nicht → schreibt den Folgesatz klein.
+    Nach der Ersetzung wird der erste Buchstabe nachträglich großgeschrieben.
+    """
+    return re.sub(
+        r'([\.!?:]\s+)([a-zäöüà-ÿ])',
+        lambda m: m.group(1) + m.group(2).upper(),
+        text,
+    )
 
 
 def _clean_duplicate_punctuation(text: str) -> str:
@@ -51,4 +65,8 @@ def _clean_duplicate_punctuation(text: str) -> str:
     text = re.sub(r'([\(\[\{])\s*,\s*', r'\1', text)
     # Komma VOR schließender Klammer entfernen: ", )" → ")"
     text = re.sub(r'\s*,\s*([\)\]\}])', r'\1', text)
+    # Leerzeichen VOR Satzzeichen entfernen: " :" → ":"
+    text = re.sub(r' +([\.!?:,;])', r'\1', text)
+    # Punkt nach stärkerem Satzzeichen entfernen: ":." "!." "?." → ":' "!" "?"
+    text = re.sub(r'([!?:])\s*\.', r'\1', text)
     return text

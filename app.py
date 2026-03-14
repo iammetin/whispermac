@@ -222,7 +222,8 @@ class WhisperMacApp(rumps.App):
         self._mic_device_name = self._load_raw_setting("mic_device", None)
         self._mic_device_idx  = None  # wird beim Menü-Aufbau aufgelöst
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
-        self._last_insert_ends_with_word = False  # Fallback für iFrames/Browser
+        self._last_insert_ends_with_word     = False  # Fallback für iFrames/Browser
+        self._last_insert_ends_with_sentence = False  # Fallback: endet mit . ! ?
         self._f13_is_down        = False
         self._f13_hold_timer     = None
         self._f13_hold_triggered = False
@@ -508,20 +509,25 @@ class WhisperMacApp(rumps.App):
         pb      = AppKit.NSPasteboard.generalPasteboard()
         saved   = pb.stringForType_(AppKit.NSPasteboardTypeString)
 
-        # Smartes Leerzeichen: vor dem ersten Segment prüfen ob Cursor direkt
-        # nach einem Buchstaben/Zeichen steht – falls ja, Leerzeichen voranstellen.
-        # Fallback für iFrames/Browser wo AXValue nicht verfügbar ist.
+        # Smartes Leerzeichen + Großschreibung: vor dem ersten Segment prüfen
+        # was direkt vor dem Cursor steht. Fallback für iFrames/Browser.
         char_before = self._get_char_before_cursor()
         if char_before:
-            needs_leading_space = char_before not in (" ", "\n", "\t", "\r")
+            needs_leading_space  = char_before not in (" ", "\n", "\t", "\r")
+            after_sentence_end   = char_before in (".", "!", "?")
         else:
-            needs_leading_space = self._last_insert_ends_with_word
+            needs_leading_space  = self._last_insert_ends_with_word
+            after_sentence_end   = self._last_insert_ends_with_sentence
 
         last_seg = ""
         for i, (seg_text, workflow) in enumerate(segments):
-            seg_text  = apply_shortcuts(seg_text, shortcuts)
-            if seg_text and i == 0 and needs_leading_space:
-                seg_text = " " + seg_text
+            seg_text = apply_shortcuts(seg_text, shortcuts)
+            if seg_text and i == 0:
+                if needs_leading_space:
+                    seg_text = " " + seg_text
+                if after_sentence_end and seg_text.lstrip() and seg_text.lstrip()[0].islower():
+                    stripped = seg_text.lstrip()
+                    seg_text = seg_text[: len(seg_text) - len(stripped)] + stripped[0].upper() + stripped[1:]
             to_insert = seg_text
             if to_insert:
                 pb.clearContents()
@@ -538,7 +544,8 @@ class WhisperMacApp(rumps.App):
                 time.sleep(0.08)
 
         if last_seg:
-            self._last_insert_ends_with_word = last_seg[-1] not in (" ", "\n", "\t", "\r")
+            self._last_insert_ends_with_word     = last_seg[-1] not in (" ", "\n", "\t", "\r")
+            self._last_insert_ends_with_sentence = last_seg[-1] in (".", "!", "?")
 
         if saved:
             time.sleep(0.15)
