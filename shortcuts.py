@@ -3,6 +3,7 @@ WhisperMac – Kürzel-Verwaltung (Laden, Speichern, Anwenden)
 """
 import json
 import os
+import re
 
 SHORTCUTS_FILE = os.path.expanduser("~/.whispermac_shortcuts.json")
 
@@ -27,5 +28,5 @@ def apply_shortcuts(text: str, shortcuts: dict) -> str:
     for word in sorted(shortcuts.keys(), key=len, reverse=True):
         replacement = shortcuts[word]
         if word:
-            text = text.replace(word, replacement)
+            text = re.sub(re.escape(word), replacement, text, flags=re.IGNORECASE)
     return text

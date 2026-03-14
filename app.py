@@ -53,6 +53,8 @@ from recorder import AudioRecorder
 from shortcuts import apply_shortcuts, load_shortcuts
 from shortcuts_window import ShortcutsWindowController
 from transcriber import Transcriber
+from workflows import execute_action, load_workflows, split_by_triggers
+from workflows_window import WorkflowsWindowController
 
 # Pfade: funktioniert sowohl als Skript als auch als gebaute .app
 if getattr(sys, "frozen", False):
@@ -94,6 +96,7 @@ class WhisperMacApp(rumps.App):
         self._f13_last_tap    = 0.0
         self._transcribe_lock = threading.Lock()
         self._shortcuts_win   = ShortcutsWindowController.alloc().init()
+        self._workflows_win   = WorkflowsWindowController.alloc().init()
 
         # ── Status-Zeile ──────────────────────────────────────────────────
         self._status_item = rumps.MenuItem("Lade Modell…")
@@ -119,7 +122,8 @@ class WhisperMacApp(rumps.App):
         menu = [self._status_item, None, self._hist_header]
         menu.extend(self._history_items)
         menu.extend([None, self._lang_submenu,
-                     rumps.MenuItem("Kürzel…", callback=self._on_shortcuts),
+                     rumps.MenuItem("Kürzel…",    callback=self._on_shortcuts),
+                     rumps.MenuItem("Workflows…", callback=self._on_workflows),
                      None,
                      rumps.MenuItem("Beenden", callback=rumps.quit_application)])
         self.menu = menu
@@ -262,13 +266,41 @@ class WhisperMacApp(rumps.App):
             text = self.transcriber.transcribe(audio, language=self.language)
             if text and not self._is_hallucination(text):
                 text = apply_shortcuts(text, load_shortcuts())
-                self._insert_text(text + " ")
+                self._insert_with_workflows(text)
                 self._add_to_history(text)
         finally:
             self._transcribe_lock.release()
             self._set_ui(status="Bereit – fn halten zum Aufnehmen")
 
-    # ── Text einfügen ─────────────────────────────────────────────────────
+    # ── Text einfügen (mit Workflow-Unterstützung) ────────────────────────
+
+    def _insert_with_workflows(self, text: str):
+        workflows = load_workflows()
+        segments  = split_by_triggers(text, workflows)
+
+        pb      = AppKit.NSPasteboard.generalPasteboard()
+        saved   = pb.stringForType_(AppKit.NSPasteboardTypeString)
+
+        for i, (seg_text, workflow) in enumerate(segments):
+            is_last = (i == len(segments) - 1)
+            to_insert = (seg_text + " ") if (seg_text and is_last) else seg_text
+            if to_insert:
+                pb.clearContents()
+                pb.setString_forType_(to_insert, AppKit.NSPasteboardTypeString)
+                time.sleep(0.05)
+                subprocess.run([
+                    "osascript", "-e",
+                    'tell application "System Events" to keystroke "v" using command down',
+                ])
+            if workflow:
+                time.sleep(0.08)
+                execute_action(workflow.get("action", ""))
+                time.sleep(0.08)
+
+        if saved:
+            time.sleep(0.15)
+            pb.clearContents()
+            pb.setString_forType_(saved, AppKit.NSPasteboardTypeString)
 
     def _insert_text(self, text: str):
         pb = AppKit.NSPasteboard.generalPasteboard()
@@ -348,11 +380,16 @@ class WhisperMacApp(rumps.App):
         CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, up)
 
-    # ── Kürzel ────────────────────────────────────────────────────────────
+    # ── Kürzel & Workflows ────────────────────────────────────────────────
 
     def _on_shortcuts(self, sender):
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
             self._shortcuts_win.show
+        )
+
+    def _on_workflows(self, sender):
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+            self._workflows_win.show
         )
 
     # ── Sprache ───────────────────────────────────────────────────────────
