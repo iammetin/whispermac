@@ -24,17 +24,27 @@ import rumps
 logging.info("AppKit + rumps importiert")
 from CoreFoundation import CFRunLoopGetMain
 from Quartz import (
+    CGEventCreateKeyboardEvent,
     CGEventGetFlags,
+    CGEventGetIntegerValueField,
+    CGEventPost,
+    CGEventSetFlags,
     CGEventTapCreate,
     CGEventTapEnable,
     CFMachPortCreateRunLoopSource,
     CFRunLoopAddSource,
     kCFRunLoopCommonModes,
     kCGEventFlagsChanged,
+    kCGEventFlagMaskAlternate,
     kCGEventFlagMaskSecondaryFn,
+    kCGEventKeyDown,
     kCGHeadInsertEventTap,
+    kCGHIDEventTap,
+    kCGKeyboardEventKeycode,
     kCGSessionEventTap,
 )
+
+F13_KEYCODE = 105
 
 from overlay import RecordingOverlay
 from permissions import ensure_permissions
@@ -151,15 +161,20 @@ class WhisperMacApp(rumps.App):
     def _start_fn_listener(self):
         def _callback(proxy, event_type, event, refcon):
             try:
-                flags   = CGEventGetFlags(event)
-                fn_down = bool(flags & FN_FLAG)
-
-                if fn_down and not self._fn_pressed:
-                    self._fn_pressed = True
-                    self._on_fn_press()
-                elif not fn_down and self._fn_pressed:
-                    self._fn_pressed = False
-                    self._on_fn_release()
+                if event_type == kCGEventKeyDown:
+                    kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+                    if kc == F13_KEYCODE:
+                        self._delete_last_word()
+                        return None  # F13 unterdrücken
+                else:
+                    flags   = CGEventGetFlags(event)
+                    fn_down = bool(flags & FN_FLAG)
+                    if fn_down and not self._fn_pressed:
+                        self._fn_pressed = True
+                        self._on_fn_press()
+                    elif not fn_down and self._fn_pressed:
+                        self._fn_pressed = False
+                        self._on_fn_release()
             except Exception as e:
                 print(f"fn-Listener Fehler: {e}")
             return event
@@ -168,7 +183,7 @@ class WhisperMacApp(rumps.App):
             kCGSessionEventTap,
             kCGHeadInsertEventTap,
             0,
-            1 << kCGEventFlagsChanged,
+            (1 << kCGEventFlagsChanged) | (1 << kCGEventKeyDown),
             _callback,
             None,
         )
@@ -266,6 +281,18 @@ class WhisperMacApp(rumps.App):
         pb = AppKit.NSPasteboard.generalPasteboard()
         pb.clearContents()
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+
+    # ── Letztes Wort löschen (F13) ────────────────────────────────────────
+
+    def _delete_last_word(self):
+        """Schickt Option+Delete direkt über Quartz – kein Prozess, kein Delay."""
+        KEY_DELETE = 51
+        down = CGEventCreateKeyboardEvent(None, KEY_DELETE, True)
+        CGEventSetFlags(down, kCGEventFlagMaskAlternate)
+        CGEventPost(kCGHIDEventTap, down)
+        up = CGEventCreateKeyboardEvent(None, KEY_DELETE, False)
+        CGEventSetFlags(up, kCGEventFlagMaskAlternate)
+        CGEventPost(kCGHIDEventTap, up)
 
     # ── Sprache ───────────────────────────────────────────────────────────
 
