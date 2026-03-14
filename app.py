@@ -150,6 +150,13 @@ class WhisperMacApp(rumps.App):
         self.transcriber.preload()
         self._set_ui(status="Bereit – fn halten zum Aufnehmen")
         self._start_fn_listener()
+        # Kurz "Bereit" neben dem Icon anzeigen, dann wieder ausblenden
+        def _show_ready():
+            self.title = " Bereit"
+        def _hide_ready():
+            self.title = ""
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show_ready)
+        threading.Timer(3.0, lambda: AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_hide_ready)).start()
 
     # ── UI-Update (thread-safe) ───────────────────────────────────────────
 
