@@ -192,9 +192,10 @@ class WhisperMacApp(rumps.App):
         self._fn_pressed      = False
         self.language         = self._load_language()
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
-        self._f13_is_down       = False
-        self._f13_hold_timer    = None
+        self._f13_is_down        = False
+        self._f13_hold_timer     = None
         self._f13_hold_triggered = False
+        self._f13_last_was_hold  = False
         self._transcribe_lock = threading.Lock()
         self._shortcuts_win   = ShortcutsWindowController.alloc().init()
         self._workflows_win   = WorkflowsWindowController.alloc().init()
@@ -473,9 +474,14 @@ class WhisperMacApp(rumps.App):
 
     def _on_f13_hold(self):
         self._f13_hold_triggered = True
-        self._delete_line()
+        if self._f13_last_was_hold:
+            self._delete_line_above()
+        else:
+            self._delete_line()
+        self._f13_last_was_hold = True
 
     def _delete_last_word(self):
+        self._f13_last_was_hold = False
         KEY_DELETE = 51
         down = CGEventCreateKeyboardEvent(None, KEY_DELETE, True)
         CGEventSetFlags(down, kCGEventFlagMaskAlternate)
@@ -487,6 +493,13 @@ class WhisperMacApp(rumps.App):
     def _delete_line(self):
         subprocess.run(["osascript", "-e",
             "tell application \"System Events\" to key code 51 using command down"])
+
+    def _delete_line_above(self):
+        subprocess.run(["osascript", "-e", """tell application "System Events"
+    key code 126
+    key code 124 using command down
+    key code 51 using command down
+end tell"""])
 
     def _undo(self):
         KEY_Z = 6
