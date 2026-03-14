@@ -5,6 +5,7 @@ fn-Taste halten → aufnehmen → loslassen → Text wird eingefügt
 import json
 import os
 import subprocess
+from deep_translator import GoogleTranslator
 import sys
 import threading
 import time
@@ -84,6 +85,10 @@ LANG_OPTIONS = [
     ("fr", "Français"),
     ("es", "Español"),
     ("it", "Italiano"),
+]
+TRANSLATE_OPTIONS = [
+    (None, "Aus"),
+    ("en", "→ Englisch"),
 ]
 
 
@@ -190,7 +195,8 @@ class WhisperMacApp(rumps.App):
 
         self._is_recording    = False
         self._fn_pressed      = False
-        self.language         = self._load_language()
+        self.language         = self._load_setting("language", None, {c for c,_ in LANG_OPTIONS})
+        self._translate_to    = self._load_setting("translate_to", None, {c for c,_ in TRANSLATE_OPTIONS})
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
         self._f13_is_down        = False
         self._f13_hold_timer     = None
@@ -220,10 +226,18 @@ class WhisperMacApp(rumps.App):
             self._lang_submenu[label] = item
             self._lang_menu_items[code] = item
 
+        # ── Live übersetzen-Untermenü ──────────────────────────────────────
+        self._translate_submenu    = rumps.MenuItem("Live übersetzen")
+        self._translate_menu_items = {}
+        for code, label in TRANSLATE_OPTIONS:
+            item = rumps.MenuItem(label, callback=self._on_translate_select)
+            self._translate_submenu[label] = item
+            self._translate_menu_items[code] = item
+
         # ── Menü zusammenbauen ────────────────────────────────────────────
         menu = [self._status_item, None, self._hist_header]
         menu.extend(self._history_items)
-        menu.extend([None, self._lang_submenu,
+        menu.extend([None, self._lang_submenu, self._translate_submenu,
                      rumps.MenuItem("Kürzel…",    callback=self._on_shortcuts),
                      rumps.MenuItem("Workflows…", callback=self._on_workflows),
                      None,
@@ -235,8 +249,9 @@ class WhisperMacApp(rumps.App):
         for item in self._history_items:
             item._menuitem.setHidden_(True)
 
-        # Häkchen bei gespeicherter Sprache setzen
+        # Häkchen bei gespeicherter Auswahl setzen
         self._lang_menu_items[self.language]._menuitem.setState_(1)
+        self._translate_menu_items[self._translate_to]._menuitem.setState_(1)
 
         # Dock-Icon aktivieren
         rumps.Timer(self._show_dock_icon, 0.2).start()
@@ -374,6 +389,11 @@ class WhisperMacApp(rumps.App):
 
         try:
             text = self.transcriber.transcribe(audio, language=self.language)
+            if text and self._translate_to:
+                text = GoogleTranslator(
+                    source=self.language or "auto",
+                    target=self._translate_to,
+                ).translate(text) or text
             if text and not self._is_hallucination(text):
                 self._insert_with_workflows(text)
                 self._add_to_history(text)
@@ -524,20 +544,19 @@ end tell"""])
 
     # ── Sprache ───────────────────────────────────────────────────────────
 
-    def _load_language(self):
+    def _load_setting(self, key, default, valid_values):
         try:
             with open(SETTINGS_FILE, encoding="utf-8") as f:
                 data = json.load(f)
-            lang = data.get("language", None)
-            valid = {code for code, _ in LANG_OPTIONS}
-            return lang if lang in valid else None
+            val = data.get(key, default)
+            return val if val in valid_values else default
         except Exception:
-            return None
+            return default
 
-    def _save_language(self):
+    def _save_settings(self):
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"language": self.language}, f)
+                json.dump({"language": self.language, "translate_to": self._translate_to}, f)
         except Exception:
             pass
 
@@ -548,7 +567,17 @@ end tell"""])
             if sender.title == label:
                 self.language = code
                 self._lang_menu_items[code]._menuitem.setState_(1)
-                self._save_language()
+                self._save_settings()
+                break
+
+    def _on_translate_select(self, sender):
+        for code, label in TRANSLATE_OPTIONS:
+            self._translate_menu_items[code]._menuitem.setState_(0)
+        for code, label in TRANSLATE_OPTIONS:
+            if sender.title == label:
+                self._translate_to = code
+                self._translate_menu_items[code]._menuitem.setState_(1)
+                self._save_settings()
                 break
 
 

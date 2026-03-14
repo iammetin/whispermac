@@ -15,11 +15,12 @@ class Transcriber:
         self._model_loaded = True
         print("Modell geladen.")
 
-    def transcribe(self, audio: np.ndarray, language: str = None) -> str:
+    def transcribe(self, audio: np.ndarray, language: str = None, task: str = "transcribe") -> str:
         result = mlx_whisper.transcribe(
             audio,
             path_or_hf_repo=self.model_path,
             language=language,
+            task=task,
             word_timestamps=False,
         )
         return result.get("text", "").strip()
