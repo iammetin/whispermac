@@ -222,6 +222,7 @@ class WhisperMacApp(rumps.App):
         self._mic_device_name = self._load_raw_setting("mic_device", None)
         self._mic_device_idx  = None  # wird beim Menü-Aufbau aufgelöst
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
+        self._last_insert_ends_with_word = False  # Fallback für iFrames/Browser
         self._f13_is_down        = False
         self._f13_hold_timer     = None
         self._f13_hold_triggered = False
@@ -459,6 +460,45 @@ class WhisperMacApp(rumps.App):
 
     # ── Text einfügen (mit Workflow-Unterstützung) ────────────────────────
 
+    def _get_char_before_cursor(self) -> str:
+        """Gibt das Zeichen direkt vor dem Cursor zurück, oder '' wenn unbekannt."""
+        try:
+            from ApplicationServices import (
+                AXUIElementCreateSystemWide,
+                AXUIElementCopyAttributeValue,
+            )
+
+            system = AXUIElementCreateSystemWide()
+            err, focused = AXUIElementCopyAttributeValue(system, "AXFocusedUIElement", None)
+            logging.debug(f"AX focused: err={err}, focused={focused is not None}")
+            if err != 0 or focused is None:
+                return ""
+            err, sel_range = AXUIElementCopyAttributeValue(focused, "AXSelectedTextRange", None)
+            logging.debug(f"AX sel_range: err={err}, sel_range={sel_range}")
+            if err != 0 or sel_range is None:
+                return ""
+            import re as _re
+            m = _re.search(r'location:(\d+)', str(sel_range))
+            if not m:
+                return ""
+            loc = int(m.group(1))
+            logging.debug(f"AX cursor loc={loc}")
+            if loc == 0:
+                return ""
+            err, full_text = AXUIElementCopyAttributeValue(focused, "AXValue", None)
+            logging.debug(f"AX full_text: err={err}, type={type(full_text)}, loc={loc}")
+            if err != 0 or not full_text:
+                return ""
+            text_str = str(full_text)
+            if loc > len(text_str):
+                return ""
+            char = text_str[loc - 1]
+            logging.debug(f"AX char_before={repr(char)}")
+            return char
+        except Exception as e:
+            logging.debug(f"_get_char_before_cursor exception: {e}")
+            return ""
+
     def _insert_with_workflows(self, text: str):
         # Workflows zuerst auf Original-Text (verhindert rstrip-Konflikt mit Kürzeln)
         workflows = load_workflows()
@@ -468,10 +508,21 @@ class WhisperMacApp(rumps.App):
         pb      = AppKit.NSPasteboard.generalPasteboard()
         saved   = pb.stringForType_(AppKit.NSPasteboardTypeString)
 
+        # Smartes Leerzeichen: vor dem ersten Segment prüfen ob Cursor direkt
+        # nach einem Buchstaben/Zeichen steht – falls ja, Leerzeichen voranstellen.
+        # Fallback für iFrames/Browser wo AXValue nicht verfügbar ist.
+        char_before = self._get_char_before_cursor()
+        if char_before:
+            needs_leading_space = char_before not in (" ", "\n", "\t", "\r")
+        else:
+            needs_leading_space = self._last_insert_ends_with_word
+
+        last_seg = ""
         for i, (seg_text, workflow) in enumerate(segments):
-            is_last   = (i == len(segments) - 1)
             seg_text  = apply_shortcuts(seg_text, shortcuts)
-            to_insert = (seg_text + " ") if (seg_text and is_last) else seg_text
+            if seg_text and i == 0 and needs_leading_space:
+                seg_text = " " + seg_text
+            to_insert = seg_text
             if to_insert:
                 pb.clearContents()
                 pb.setString_forType_(to_insert, AppKit.NSPasteboardTypeString)
@@ -480,10 +531,14 @@ class WhisperMacApp(rumps.App):
                     "osascript", "-e",
                     'tell application "System Events" to keystroke "v" using command down',
                 ])
+                last_seg = to_insert
             if workflow:
                 time.sleep(0.08)
                 execute_action(workflow.get("action", ""))
                 time.sleep(0.08)
+
+        if last_seg:
+            self._last_insert_ends_with_word = last_seg[-1] not in (" ", "\n", "\t", "\r")
 
         if saved:
             time.sleep(0.15)
