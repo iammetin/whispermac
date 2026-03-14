@@ -24,6 +24,8 @@ import rumps
 logging.info("AppKit + rumps importiert")
 from CoreFoundation import CFRunLoopGetMain
 from Quartz import (
+    CGDisplayHideCursor,
+    CGDisplayShowCursor,
     CGEventCreateKeyboardEvent,
     CGEventGetFlags,
     CGEventGetIntegerValueField,
@@ -36,6 +38,7 @@ from Quartz import (
     kCFRunLoopCommonModes,
     kCGEventFlagsChanged,
     kCGEventFlagMaskAlternate,
+    kCGEventFlagMaskCommand,
     kCGEventFlagMaskSecondaryFn,
     kCGEventKeyDown,
     kCGHeadInsertEventTap,
@@ -43,6 +46,9 @@ from Quartz import (
     kCGKeyboardEventKeycode,
     kCGSessionEventTap,
 )
+
+# kCGDirectMainDisplay = 0 (not exported by all PyObjC versions)
+kCGDirectMainDisplay = 0
 
 F13_KEYCODE = 105
 F14_KEYCODE = 179
@@ -79,13 +85,14 @@ LANG_OPTIONS = [
 
 
 class _TranscriptionSpinner:
-    """Kleiner schwebender Spinner neben dem Cursor während der Transkription."""
+    """Ersetzt den Cursor durch einen modernen Glas-Spinner während der Transkription."""
 
-    SIZE = 40
+    SIZE = 32
 
     def __init__(self):
-        self._window  = None
-        self._spinner = None
+        self._window   = None
+        self._spinner  = None
+        self._tracking = False
 
     def show(self):
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._show_main)
@@ -96,17 +103,33 @@ class _TranscriptionSpinner:
     def _show_main(self):
         if self._window is None:
             self._build()
-        mouse = AppKit.NSEvent.mouseLocation()
-        self._window.setFrameOrigin_(
-            AppKit.NSMakePoint(mouse.x + 12, mouse.y - self.SIZE - 4)
-        )
+        self._update_pos()
         self._spinner.startAnimation_(None)
         self._window.orderFrontRegardless()
+        CGDisplayHideCursor(kCGDirectMainDisplay)
+        self._tracking = True
+        threading.Thread(target=self._track_loop, daemon=True).start()
 
     def _hide_main(self):
+        self._tracking = False
         if self._window:
             self._spinner.stopAnimation_(None)
             self._window.orderOut_(None)
+        CGDisplayShowCursor(kCGDirectMainDisplay)
+
+    def _track_loop(self):
+        """Hält den Spinner am Cursor, solange er läuft."""
+        while self._tracking:
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._update_pos)
+            time.sleep(0.05)
+
+    def _update_pos(self):
+        if self._window:
+            S = self.SIZE
+            m = AppKit.NSEvent.mouseLocation()
+            self._window.setFrameOrigin_(
+                AppKit.NSMakePoint(m.x - S / 2, m.y - S / 2)
+            )
 
     def _build(self):
         S = self.SIZE
@@ -120,15 +143,17 @@ class _TranscriptionSpinner:
         win.setOpaque_(False)
         win.setBackgroundColor_(AppKit.NSColor.clearColor())
         win.setIgnoresMouseEvents_(True)
+        win.setHasShadow_(True)
         win.setCollectionBehavior_(
             AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
             AppKit.NSWindowCollectionBehaviorStationary
         )
 
+        # Helles, modernes Glas (Popover-Material – passt sich Dark/Light Mode an)
         fx = AppKit.NSVisualEffectView.alloc().initWithFrame_(
             AppKit.NSMakeRect(0, 0, S, S)
         )
-        fx.setMaterial_(13)
+        fx.setMaterial_(6)    # Popover – hell, glasig
         fx.setBlendingMode_(0)
         fx.setState_(1)
         fx.setWantsLayer_(True)
@@ -137,7 +162,7 @@ class _TranscriptionSpinner:
         win.setContentView_(fx)
 
         spinner = AppKit.NSProgressIndicator.alloc().initWithFrame_(
-            AppKit.NSMakeRect(8, 8, S - 16, S - 16)
+            AppKit.NSMakeRect(7, 7, S - 14, S - 14)
         )
         spinner.setStyle_(AppKit.NSProgressIndicatorStyleSpinning)
         spinner.setControlSize_(AppKit.NSControlSizeSmall)
@@ -277,7 +302,7 @@ class WhisperMacApp(rumps.App):
                         self._fn_pressed = False
                         self._on_fn_release()
             except Exception as e:
-                print(f"fn-Listener Fehler: {e}")
+                logging.exception(f"fn-Listener Fehler: {e}")
             return event
 
         tap = CGEventTapCreate(
@@ -447,7 +472,6 @@ class WhisperMacApp(rumps.App):
 
     def _undo(self):
         """Schickt Cmd+Z direkt über Quartz."""
-        from Quartz import kCGEventFlagMaskCommand
         KEY_Z = 6
         down = CGEventCreateKeyboardEvent(None, KEY_Z, True)
         CGEventSetFlags(down, kCGEventFlagMaskCommand)
