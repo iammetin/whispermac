@@ -85,11 +85,12 @@ class WhisperMacApp(rumps.App):
         self.transcriber = Transcriber(MODEL_PATH)
         self.overlay     = RecordingOverlay()
 
-        self._is_recording  = False
-        self._fn_pressed    = False
-        self.language       = None
-        self._history       = []   # letzte Transkriptionen (neueste zuerst)
-        self._f13_last_tap  = 0.0
+        self._is_recording    = False
+        self._fn_pressed      = False
+        self.language         = None
+        self._history         = []   # letzte Transkriptionen (neueste zuerst)
+        self._f13_last_tap    = 0.0
+        self._transcribe_lock = threading.Lock()
 
         # ── Status-Zeile ──────────────────────────────────────────────────
         self._status_item = rumps.MenuItem("Lade Modell…")
@@ -240,13 +241,19 @@ class WhisperMacApp(rumps.App):
             self._set_ui(status="Bereit – fn halten zum Aufnehmen")
             return
 
-        text = self.transcriber.transcribe(audio, language=self.language)
+        if not self._transcribe_lock.acquire(blocking=False):
+            # Transkription läuft bereits – Aufnahme verwerfen
+            self._set_ui(status="Bereit – fn halten zum Aufnehmen")
+            return
 
-        if text:
-            self._insert_text(text + " ")
-            self._add_to_history(text)
-
-        self._set_ui(status="Bereit – fn halten zum Aufnehmen")
+        try:
+            text = self.transcriber.transcribe(audio, language=self.language)
+            if text:
+                self._insert_text(text + " ")
+                self._add_to_history(text)
+        finally:
+            self._transcribe_lock.release()
+            self._set_ui(status="Bereit – fn halten zum Aufnehmen")
 
     # ── Text einfügen ─────────────────────────────────────────────────────
 
