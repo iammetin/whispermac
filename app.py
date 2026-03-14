@@ -2,6 +2,7 @@
 WhisperMac – Lokale Sprache-zu-Text Mac-App
 fn-Taste halten → aufnehmen → loslassen → Text wird eingefügt
 """
+import json
 import os
 import subprocess
 import sys
@@ -71,6 +72,7 @@ else:
     MODEL_PATH    = os.path.join(BASE_DIR, "models", "whisper-large-v3-turbo")
     MENUBAR_ICON  = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
+SETTINGS_FILE = os.path.expanduser("~/.whispermac_settings.json")
 FN_FLAG      = kCGEventFlagMaskSecondaryFn   # 0x800000
 HISTORY_MAX  = 5
 LANG_OPTIONS = [
@@ -187,7 +189,7 @@ class WhisperMacApp(rumps.App):
 
         self._is_recording    = False
         self._fn_pressed      = False
-        self.language         = None
+        self.language         = self._load_language()
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
         self._f13_last_tap    = 0.0
         self._transcribe_lock = threading.Lock()
@@ -229,8 +231,8 @@ class WhisperMacApp(rumps.App):
         for item in self._history_items:
             item._menuitem.setHidden_(True)
 
-        # Häkchen bei "Auto" setzen
-        self._lang_menu_items[None]._menuitem.setState_(1)   # NSOnState
+        # Häkchen bei gespeicherter Sprache setzen
+        self._lang_menu_items[self.language]._menuitem.setState_(1)
 
         # Dock-Icon aktivieren
         rumps.Timer(self._show_dock_icon, 0.2).start()
@@ -282,9 +284,7 @@ class WhisperMacApp(rumps.App):
                         now = time.time()
                         if now - self._f13_last_tap < 0.4:
                             self._f13_last_tap = 0.0
-                            self._delete_last_word()
-                            self._delete_last_word()
-                            self._delete_last_word()
+                            self._delete_line()
                         else:
                             self._f13_last_tap = now
                             self._delete_last_word()
@@ -461,7 +461,6 @@ class WhisperMacApp(rumps.App):
         return text.strip().lower() in self._HALLUCINATIONS
 
     def _delete_last_word(self):
-        """Schickt Option+Delete direkt über Quartz – kein Prozess, kein Delay."""
         KEY_DELETE = 51
         down = CGEventCreateKeyboardEvent(None, KEY_DELETE, True)
         CGEventSetFlags(down, kCGEventFlagMaskAlternate)
@@ -470,8 +469,16 @@ class WhisperMacApp(rumps.App):
         CGEventSetFlags(up, kCGEventFlagMaskAlternate)
         CGEventPost(kCGHIDEventTap, up)
 
+    def _delete_line(self):
+        KEY_DELETE = 51
+        down = CGEventCreateKeyboardEvent(None, KEY_DELETE, True)
+        CGEventSetFlags(down, kCGEventFlagMaskCommand)
+        CGEventPost(kCGHIDEventTap, down)
+        up = CGEventCreateKeyboardEvent(None, KEY_DELETE, False)
+        CGEventSetFlags(up, kCGEventFlagMaskCommand)
+        CGEventPost(kCGHIDEventTap, up)
+
     def _undo(self):
-        """Schickt Cmd+Z direkt über Quartz."""
         KEY_Z = 6
         down = CGEventCreateKeyboardEvent(None, KEY_Z, True)
         CGEventSetFlags(down, kCGEventFlagMaskCommand)
@@ -494,6 +501,23 @@ class WhisperMacApp(rumps.App):
 
     # ── Sprache ───────────────────────────────────────────────────────────
 
+    def _load_language(self):
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            lang = data.get("language", None)
+            valid = {code for code, _ in LANG_OPTIONS}
+            return lang if lang in valid else None
+        except Exception:
+            return None
+
+    def _save_language(self):
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"language": self.language}, f)
+        except Exception:
+            pass
+
     def _on_lang_select(self, sender):
         for code, label in LANG_OPTIONS:
             self._lang_menu_items[code]._menuitem.setState_(0)
@@ -501,6 +525,7 @@ class WhisperMacApp(rumps.App):
             if sender.title == label:
                 self.language = code
                 self._lang_menu_items[code]._menuitem.setState_(1)
+                self._save_language()
                 break
 
 
