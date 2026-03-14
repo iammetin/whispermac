@@ -88,7 +88,19 @@ LANG_OPTIONS = [
 ]
 TRANSLATE_OPTIONS = [
     (None, "Aus"),
+    ("de", "→ Deutsch"),
     ("en", "→ Englisch"),
+    ("tr", "→ Türkisch"),
+    ("fr", "→ Französisch"),
+    ("es", "→ Spanisch"),
+    ("it", "→ Italienisch"),
+    ("pt", "→ Portugiesisch"),
+    ("nl", "→ Niederländisch"),
+    ("pl", "→ Polnisch"),
+    ("ru", "→ Russisch"),
+    ("ja", "→ Japanisch"),
+    ("zh-CN", "→ Chinesisch"),
+    ("ar", "→ Arabisch"),
 ]
 
 
