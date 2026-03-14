@@ -78,6 +78,76 @@ LANG_OPTIONS = [
 ]
 
 
+class _TranscriptionSpinner:
+    """Kleiner schwebender Spinner neben dem Cursor während der Transkription."""
+
+    SIZE = 40
+
+    def __init__(self):
+        self._window  = None
+        self._spinner = None
+
+    def show(self):
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._show_main)
+
+    def hide(self):
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._hide_main)
+
+    def _show_main(self):
+        if self._window is None:
+            self._build()
+        mouse = AppKit.NSEvent.mouseLocation()
+        self._window.setFrameOrigin_(
+            AppKit.NSMakePoint(mouse.x + 12, mouse.y - self.SIZE - 4)
+        )
+        self._spinner.startAnimation_(None)
+        self._window.orderFrontRegardless()
+
+    def _hide_main(self):
+        if self._window:
+            self._spinner.stopAnimation_(None)
+            self._window.orderOut_(None)
+
+    def _build(self):
+        S = self.SIZE
+        win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            AppKit.NSMakeRect(0, 0, S, S),
+            AppKit.NSWindowStyleMaskBorderless,
+            AppKit.NSBackingStoreBuffered,
+            False,
+        )
+        win.setLevel_(AppKit.NSStatusWindowLevel + 3)
+        win.setOpaque_(False)
+        win.setBackgroundColor_(AppKit.NSColor.clearColor())
+        win.setIgnoresMouseEvents_(True)
+        win.setCollectionBehavior_(
+            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces |
+            AppKit.NSWindowCollectionBehaviorStationary
+        )
+
+        fx = AppKit.NSVisualEffectView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, S, S)
+        )
+        fx.setMaterial_(13)
+        fx.setBlendingMode_(0)
+        fx.setState_(1)
+        fx.setWantsLayer_(True)
+        fx.layer().setCornerRadius_(S / 2.0)
+        fx.layer().setMasksToBounds_(True)
+        win.setContentView_(fx)
+
+        spinner = AppKit.NSProgressIndicator.alloc().initWithFrame_(
+            AppKit.NSMakeRect(8, 8, S - 16, S - 16)
+        )
+        spinner.setStyle_(AppKit.NSProgressIndicatorStyleSpinning)
+        spinner.setControlSize_(AppKit.NSControlSizeSmall)
+        spinner.setUsesThreadedAnimation_(True)
+        fx.addSubview_(spinner)
+
+        self._window  = win
+        self._spinner = spinner
+
+
 class WhisperMacApp(rumps.App):
 
     def __init__(self):
@@ -88,6 +158,7 @@ class WhisperMacApp(rumps.App):
         self.recorder    = AudioRecorder()
         self.transcriber = Transcriber(MODEL_PATH)
         self.overlay     = RecordingOverlay()
+        self._spinner    = _TranscriptionSpinner()
 
         self._is_recording    = False
         self._fn_pressed      = False
@@ -247,6 +318,7 @@ class WhisperMacApp(rumps.App):
             return
         self.overlay.hide()
         self._status_item.title = "Transkribiere…"
+        self._spinner.show()
         threading.Thread(target=self._transcribe_and_insert, daemon=True).start()
 
     def _transcribe_and_insert(self):
@@ -254,11 +326,12 @@ class WhisperMacApp(rumps.App):
         self._is_recording = False
 
         if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.8):
+            self._spinner.hide()
             self._set_ui(status="Bereit – fn halten zum Aufnehmen")
             return
 
         if not self._transcribe_lock.acquire(blocking=False):
-            # Transkription läuft bereits – Aufnahme verwerfen
+            self._spinner.hide()
             self._set_ui(status="Bereit – fn halten zum Aufnehmen")
             return
 
@@ -268,6 +341,7 @@ class WhisperMacApp(rumps.App):
                 self._insert_with_workflows(text)
                 self._add_to_history(text)
         finally:
+            self._spinner.hide()
             self._transcribe_lock.release()
             self._set_ui(status="Bereit – fn halten zum Aufnehmen")
 
