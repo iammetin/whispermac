@@ -45,6 +45,7 @@ from Quartz import (
     kCGEventFlagMaskSecondaryFn,
     kCGEventKeyDown,
     kCGEventKeyUp,
+    kCGEventLeftMouseDown,
     kCGHeadInsertEventTap,
     kCGHIDEventTap,
     kCGKeyboardEventKeycode,
@@ -339,11 +340,28 @@ class WhisperMacApp(rumps.App):
 
     # ── fn-Taste abfangen ─────────────────────────────────────────────────
 
+    # Keycodes die anzeigen, dass der Cursor bewegt / Text geändert wurde
+    _CURSOR_MOVE_KEYCODES = {
+        36,          # Return/Enter
+        51,          # Backspace/Delete
+        117,         # Forward Delete
+        123, 124, 125, 126,  # Pfeiltasten
+        115, 119,    # Home, End
+        116, 121,    # Page Up, Page Down
+    }
+
     def _start_fn_listener(self):
         def _callback(proxy, event_type, event, refcon):
             try:
-                if event_type == kCGEventKeyDown:
+                if event_type == kCGEventLeftMouseDown and not self._is_recording:
+                    self._last_insert_ends_with_word     = False
+                    self._last_insert_ends_with_sentence = False
+                elif event_type == kCGEventKeyDown:
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+                    # Cursor bewegt / Text geändert → Tracking-State zurücksetzen
+                    if kc in self._CURSOR_MOVE_KEYCODES and not self._is_recording:
+                        self._last_insert_ends_with_word     = False
+                        self._last_insert_ends_with_sentence = False
                     if kc == F13_KEYCODE:
                         if not self._f13_is_down:
                             self._f13_is_down        = True
@@ -381,7 +399,7 @@ class WhisperMacApp(rumps.App):
             kCGSessionEventTap,
             kCGHeadInsertEventTap,
             0,
-            (1 << kCGEventFlagsChanged) | (1 << kCGEventKeyDown) | (1 << kCGEventKeyUp),
+            (1 << kCGEventFlagsChanged) | (1 << kCGEventKeyDown) | (1 << kCGEventKeyUp) | (1 << kCGEventLeftMouseDown),
             _callback,
             None,
         )
