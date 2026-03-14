@@ -237,7 +237,7 @@ class WhisperMacApp(rumps.App):
         audio = self.recorder.stop()
         self._is_recording = False
 
-        if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.3):
+        if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.8):
             self._set_ui(status="Bereit – fn halten zum Aufnehmen")
             return
 
@@ -248,7 +248,7 @@ class WhisperMacApp(rumps.App):
 
         try:
             text = self.transcriber.transcribe(audio, language=self.language)
-            if text:
+            if text and not self._is_hallucination(text):
                 self._insert_text(text + " ")
                 self._add_to_history(text)
         finally:
@@ -303,6 +303,16 @@ class WhisperMacApp(rumps.App):
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
 
     # ── Letztes Wort löschen (F13) ────────────────────────────────────────
+
+    # ── Halluzinations-Filter ─────────────────────────────────────────────
+
+    _HALLUCINATIONS = {
+        "thank you", "thank you.", "thanks for watching", "thanks for watching.",
+        "thank you for watching", "thank you for watching.",
+    }
+
+    def _is_hallucination(self, text: str) -> bool:
+        return text.strip().lower() in self._HALLUCINATIONS
 
     def _delete_last_word(self):
         """Schickt Option+Delete direkt über Quartz – kein Prozess, kein Delay."""
