@@ -8,6 +8,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="WhisperMac"
 APP_OUT="$SCRIPT_DIR/dist/$APP_NAME.app"
 
+# ── App beenden falls sie läuft ───────────────────────────────────────────────
+if pgrep -x "$APP_NAME" > /dev/null 2>&1; then
+    echo "⏹  $APP_NAME läuft – beende..."
+    osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || true
+    sleep 1
+    pgrep -x "$APP_NAME" > /dev/null 2>&1 && pkill -x "$APP_NAME" || true
+    sleep 0.5
+fi
+
 echo "🔨 $APP_NAME.app wird gebaut..."
 
 # dist-Ordner vorbereiten
@@ -116,6 +125,10 @@ cp -r "$APP_OUT" "/Applications/"
 
 echo ""
 echo "✅ Fertig! WhisperMac.app ist in /Applications installiert."
+
+# ── App wieder starten ────────────────────────────────────────────────────────
+echo "🚀 Starte $APP_NAME..."
+open "/Applications/$APP_NAME.app"
 echo ""
 echo "Beim ersten Start → Systemeinstellungen:"
 echo "  Datenschutz & Sicherheit → Mikrofon → WhisperMac ✓"

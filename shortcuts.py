@@ -45,4 +45,10 @@ def _clean_duplicate_punctuation(text: str) -> str:
     text = re.sub(r'([\.!?;:])\s+\1', r'\1', text)
     # Doppelkomma: ", ," → ","
     text = re.sub(r',\s+,', ',', text)
+    # Komma VOR öffnender Klammer entfernen: ", (" → " ("
+    text = re.sub(r',(\s*[\(\[\{])', r'\1', text)
+    # Komma NACH öffnender Klammer entfernen: "(, " → "("
+    text = re.sub(r'([\(\[\{])\s*,\s*', r'\1', text)
+    # Komma VOR schließender Klammer entfernen: ", )" → ")"
+    text = re.sub(r'\s*,\s*([\)\]\}])', r'\1', text)
     return text
