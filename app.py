@@ -5,6 +5,7 @@ fn-Taste halten → aufnehmen → loslassen → Text wird eingefügt
 import json
 import os
 import subprocess
+import sounddevice as sd
 from deep_translator import GoogleTranslator
 import sys
 import threading
@@ -102,6 +103,15 @@ TRANSLATE_OPTIONS = [
     ("zh-CN", "→ Chinesisch"),
     ("ar", "→ Arabisch"),
 ]
+
+
+def _list_input_devices():
+    """Gibt Liste von (index, name) aller Mikrofon-Geräte zurück."""
+    result = []
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_input_channels"] > 0:
+            result.append((i, d["name"]))
+    return result
 
 
 class _TranscriptionSpinner:
@@ -209,6 +219,8 @@ class WhisperMacApp(rumps.App):
         self._fn_pressed      = False
         self.language         = self._load_setting("language", None, {c for c,_ in LANG_OPTIONS})
         self._translate_to    = self._load_setting("translate_to", None, {c for c,_ in TRANSLATE_OPTIONS})
+        self._mic_device_name = self._load_raw_setting("mic_device", None)
+        self._mic_device_idx  = None  # wird beim Menü-Aufbau aufgelöst
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
         self._f13_is_down        = False
         self._f13_hold_timer     = None
@@ -246,10 +258,24 @@ class WhisperMacApp(rumps.App):
             self._translate_submenu[label] = item
             self._translate_menu_items[code] = item
 
+        # ── Mikrofon-Untermenü ────────────────────────────────────────────
+        self._mic_submenu    = rumps.MenuItem("Mikrofon")
+        self._mic_menu_items = {}  # name -> (index, MenuItem)
+        default_item = rumps.MenuItem("System (Standard)", callback=self._on_mic_select)
+        self._mic_submenu["System (Standard)"] = default_item
+        self._mic_menu_items["System (Standard)"] = (None, default_item)
+
+        for idx, name in _list_input_devices():
+            item = rumps.MenuItem(name, callback=self._on_mic_select)
+            self._mic_submenu[name] = item
+            self._mic_menu_items[name] = (idx, item)
+            if name == self._mic_device_name:
+                self._mic_device_idx = idx
+
         # ── Menü zusammenbauen ────────────────────────────────────────────
         menu = [self._status_item, None, self._hist_header]
         menu.extend(self._history_items)
-        menu.extend([None, self._lang_submenu, self._translate_submenu,
+        menu.extend([None, self._mic_submenu, self._lang_submenu, self._translate_submenu,
                      rumps.MenuItem("Kürzel…",    callback=self._on_shortcuts),
                      rumps.MenuItem("Workflows…", callback=self._on_workflows),
                      None,
@@ -264,6 +290,11 @@ class WhisperMacApp(rumps.App):
         # Häkchen bei gespeicherter Auswahl setzen
         self._lang_menu_items[self.language]._menuitem.setState_(1)
         self._translate_menu_items[self._translate_to]._menuitem.setState_(1)
+        saved_mic = self._mic_device_name or "System (Standard)"
+        if saved_mic in self._mic_menu_items:
+            self._mic_menu_items[saved_mic][1]._menuitem.setState_(1)
+        else:
+            self._mic_menu_items["System (Standard)"][1]._menuitem.setState_(1)
 
         # Dock-Icon aktivieren
         rumps.Timer(self._show_dock_icon, 0.2).start()
@@ -283,7 +314,7 @@ class WhisperMacApp(rumps.App):
         threading.Thread(target=self._preload_model, daemon=True).start()
 
     def _preload_model(self):
-        self.recorder.warmup()
+        self.recorder.warmup(device=self._mic_device_idx)
         self.overlay.prebuild()
         self.transcriber.preload()
         self._set_ui(status="Bereit – fn halten zum Aufnehmen")
@@ -369,10 +400,22 @@ class WhisperMacApp(rumps.App):
 
     # ── Aufnahme-Workflow ─────────────────────────────────────────────────
 
+    _DICTATION_SOUND = (
+        "/System/Library/PrivateFrameworks/SpeechObjects.framework"
+        "/Versions/A/Frameworks/DictationServices.framework"
+        "/Versions/A/Resources/DefaultRecognitionSound.aiff"
+    )
+
+    def _play_start_sound(self):
+        snd = AppKit.NSSound.soundNamed_("Funk")
+        if snd:
+            snd.play()
+
     def _on_fn_press(self):
         if self._is_recording:
             return
         self._is_recording = True
+        self._play_start_sound()
         self._status_item.title = "Aufnahme läuft…"
         self.recorder.start()
         self.overlay.show(lambda: self.recorder.current_level)
@@ -556,6 +599,13 @@ end tell"""])
 
     # ── Sprache ───────────────────────────────────────────────────────────
 
+    def _load_raw_setting(self, key, default):
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                return json.load(f).get(key, default)
+        except Exception:
+            return default
+
     def _load_setting(self, key, default, valid_values):
         try:
             with open(SETTINGS_FILE, encoding="utf-8") as f:
@@ -568,7 +618,11 @@ end tell"""])
     def _save_settings(self):
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"language": self.language, "translate_to": self._translate_to}, f)
+                json.dump({
+                    "language":    self.language,
+                    "translate_to": self._translate_to,
+                    "mic_device":  self._mic_device_name,
+                }, f)
         except Exception:
             pass
 
@@ -581,6 +635,18 @@ end tell"""])
                 self._lang_menu_items[code]._menuitem.setState_(1)
                 self._save_settings()
                 break
+
+    def _on_mic_select(self, sender):
+        for name, (idx, item) in self._mic_menu_items.items():
+            item._menuitem.setState_(0)
+        name = sender.title
+        if name in self._mic_menu_items:
+            idx, item = self._mic_menu_items[name]
+            item._menuitem.setState_(1)
+            self._mic_device_idx  = idx
+            self._mic_device_name = None if name == "System (Standard)" else name
+            threading.Thread(target=self.recorder.set_device, args=(idx,), daemon=True).start()
+            self._save_settings()
 
     def _on_translate_select(self, sender):
         for code, label in TRANSLATE_OPTIONS:

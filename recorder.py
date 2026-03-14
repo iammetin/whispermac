@@ -11,16 +11,30 @@ class AudioRecorder:
         self._lock      = threading.Lock()
         self._recording = False
         self._stream    = None
+        self._device    = None
 
-    def warmup(self):
+    def warmup(self, device=None):
         """Stream dauerhaft öffnen – start()/stop() setzen nur ein Flag, kein Overhead."""
+        self._device = device
+        self._open_stream()
+
+    def _open_stream(self):
+        if self._stream:
+            self._stream.stop()
+            self._stream.close()
         self._stream = sd.InputStream(
             samplerate=self.SAMPLE_RATE,
             channels=1,
             dtype="float32",
+            device=self._device,
             callback=self._callback,
         )
         self._stream.start()
+
+    def set_device(self, device):
+        """Mikrofon wechseln während die App läuft."""
+        self._device = device
+        self._open_stream()
 
     def start(self):
         """Aufnahme starten – nur Flag setzen, stream läuft bereits."""
