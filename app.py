@@ -50,6 +50,8 @@ F14_KEYCODE = 179
 from overlay import RecordingOverlay
 from permissions import ensure_permissions
 from recorder import AudioRecorder
+from shortcuts import apply_shortcuts, load_shortcuts
+from shortcuts_window import ShortcutsWindowController
 from transcriber import Transcriber
 
 # Pfade: funktioniert sowohl als Skript als auch als gebaute .app
@@ -91,6 +93,7 @@ class WhisperMacApp(rumps.App):
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
         self._f13_last_tap    = 0.0
         self._transcribe_lock = threading.Lock()
+        self._shortcuts_win   = ShortcutsWindowController.alloc().init()
 
         # ── Status-Zeile ──────────────────────────────────────────────────
         self._status_item = rumps.MenuItem("Lade Modell…")
@@ -115,7 +118,9 @@ class WhisperMacApp(rumps.App):
         # ── Menü zusammenbauen ────────────────────────────────────────────
         menu = [self._status_item, None, self._hist_header]
         menu.extend(self._history_items)
-        menu.extend([None, self._lang_submenu, None,
+        menu.extend([None, self._lang_submenu,
+                     rumps.MenuItem("Kürzel…", callback=self._on_shortcuts),
+                     None,
                      rumps.MenuItem("Beenden", callback=rumps.quit_application)])
         self.menu = menu
 
@@ -256,6 +261,7 @@ class WhisperMacApp(rumps.App):
         try:
             text = self.transcriber.transcribe(audio, language=self.language)
             if text and not self._is_hallucination(text):
+                text = apply_shortcuts(text, load_shortcuts())
                 self._insert_text(text + " ")
                 self._add_to_history(text)
         finally:
@@ -341,6 +347,13 @@ class WhisperMacApp(rumps.App):
         up = CGEventCreateKeyboardEvent(None, KEY_Z, False)
         CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, up)
+
+    # ── Kürzel ────────────────────────────────────────────────────────────
+
+    def _on_shortcuts(self, sender):
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+            self._shortcuts_win.show
+        )
 
     # ── Sprache ───────────────────────────────────────────────────────────
 
