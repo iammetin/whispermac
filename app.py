@@ -192,8 +192,9 @@ class WhisperMacApp(rumps.App):
         self._fn_pressed      = False
         self.language         = self._load_language()
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
-        self._f13_down_time   = 0.0
-        self._f13_is_down     = False
+        self._f13_is_down       = False
+        self._f13_hold_timer    = None
+        self._f13_hold_triggered = False
         self._transcribe_lock = threading.Lock()
         self._shortcuts_win   = ShortcutsWindowController.alloc().init()
         self._workflows_win   = WorkflowsWindowController.alloc().init()
@@ -284,8 +285,10 @@ class WhisperMacApp(rumps.App):
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
                     if kc == F13_KEYCODE:
                         if not self._f13_is_down:
-                            self._f13_is_down   = True
-                            self._f13_down_time = time.time()
+                            self._f13_is_down        = True
+                            self._f13_hold_triggered = False
+                            self._f13_hold_timer = threading.Timer(0.4, self._on_f13_hold)
+                            self._f13_hold_timer.start()
                         return None
                     if kc == F14_KEYCODE:
                         self._undo()
@@ -294,9 +297,10 @@ class WhisperMacApp(rumps.App):
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
                     if kc == F13_KEYCODE:
                         self._f13_is_down = False
-                        if time.time() - self._f13_down_time > 0.4:
-                            threading.Thread(target=self._delete_line, daemon=True).start()
-                        else:
+                        if self._f13_hold_timer:
+                            self._f13_hold_timer.cancel()
+                            self._f13_hold_timer = None
+                        if not self._f13_hold_triggered:
                             self._delete_last_word()
                         return None
                 else:
@@ -466,6 +470,10 @@ class WhisperMacApp(rumps.App):
 
     def _is_hallucination(self, text: str) -> bool:
         return text.strip().lower() in self._HALLUCINATIONS
+
+    def _on_f13_hold(self):
+        self._f13_hold_triggered = True
+        self._delete_line()
 
     def _delete_last_word(self):
         KEY_DELETE = 51
