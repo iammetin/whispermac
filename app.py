@@ -42,6 +42,7 @@ from Quartz import (
     kCGEventFlagMaskCommand,
     kCGEventFlagMaskSecondaryFn,
     kCGEventKeyDown,
+    kCGEventKeyUp,
     kCGHeadInsertEventTap,
     kCGHIDEventTap,
     kCGKeyboardEventKeycode,
@@ -191,7 +192,7 @@ class WhisperMacApp(rumps.App):
         self._fn_pressed      = False
         self.language         = self._load_language()
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
-        self._f13_last_tap    = 0.0
+        self._f13_down_time   = 0.0
         self._transcribe_lock = threading.Lock()
         self._shortcuts_win   = ShortcutsWindowController.alloc().init()
         self._workflows_win   = WorkflowsWindowController.alloc().init()
@@ -281,16 +282,20 @@ class WhisperMacApp(rumps.App):
                 if event_type == kCGEventKeyDown:
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
                     if kc == F13_KEYCODE:
-                        now = time.time()
-                        if now - self._f13_last_tap < 0.4:
-                            self._f13_last_tap = 0.0
-                            self._delete_line()
-                        else:
-                            self._f13_last_tap = now
-                            self._delete_last_word()
+                        auto_repeat = CGEventGetIntegerValueField(event, 2)  # kCGKeyboardEventAutorepeat
+                        if not auto_repeat:
+                            self._f13_down_time = time.time()
                         return None
                     if kc == F14_KEYCODE:
                         self._undo()
+                        return None
+                elif event_type == kCGEventKeyUp:
+                    kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+                    if kc == F13_KEYCODE:
+                        if time.time() - self._f13_down_time > 0.4:
+                            self._delete_line()
+                        else:
+                            self._delete_last_word()
                         return None
                 else:
                     flags   = CGEventGetFlags(event)
@@ -309,7 +314,7 @@ class WhisperMacApp(rumps.App):
             kCGSessionEventTap,
             kCGHeadInsertEventTap,
             0,
-            (1 << kCGEventFlagsChanged) | (1 << kCGEventKeyDown),
+            (1 << kCGEventFlagsChanged) | (1 << kCGEventKeyDown) | (1 << kCGEventKeyUp),
             _callback,
             None,
         )
