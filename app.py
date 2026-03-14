@@ -193,6 +193,7 @@ class WhisperMacApp(rumps.App):
         self.language         = self._load_language()
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
         self._f13_down_time   = 0.0
+        self._f13_is_down     = False
         self._transcribe_lock = threading.Lock()
         self._shortcuts_win   = ShortcutsWindowController.alloc().init()
         self._workflows_win   = WorkflowsWindowController.alloc().init()
@@ -282,8 +283,8 @@ class WhisperMacApp(rumps.App):
                 if event_type == kCGEventKeyDown:
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
                     if kc == F13_KEYCODE:
-                        auto_repeat = CGEventGetIntegerValueField(event, 2)  # kCGKeyboardEventAutorepeat
-                        if not auto_repeat:
+                        if not self._f13_is_down:
+                            self._f13_is_down   = True
                             self._f13_down_time = time.time()
                         return None
                     if kc == F14_KEYCODE:
@@ -292,8 +293,9 @@ class WhisperMacApp(rumps.App):
                 elif event_type == kCGEventKeyUp:
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
                     if kc == F13_KEYCODE:
+                        self._f13_is_down = False
                         if time.time() - self._f13_down_time > 0.4:
-                            self._delete_line()
+                            threading.Thread(target=self._delete_line, daemon=True).start()
                         else:
                             self._delete_last_word()
                         return None
@@ -475,13 +477,8 @@ class WhisperMacApp(rumps.App):
         CGEventPost(kCGHIDEventTap, up)
 
     def _delete_line(self):
-        KEY_DELETE = 51
-        down = CGEventCreateKeyboardEvent(None, KEY_DELETE, True)
-        CGEventSetFlags(down, kCGEventFlagMaskCommand)
-        CGEventPost(kCGHIDEventTap, down)
-        up = CGEventCreateKeyboardEvent(None, KEY_DELETE, False)
-        CGEventSetFlags(up, kCGEventFlagMaskCommand)
-        CGEventPost(kCGHIDEventTap, up)
+        subprocess.run(["osascript", "-e",
+            "tell application \"System Events\" to key code 51 using command down"])
 
     def _undo(self):
         KEY_Z = 6
