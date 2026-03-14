@@ -45,6 +45,7 @@ from Quartz import (
 )
 
 F13_KEYCODE = 105
+F14_KEYCODE = 179
 
 from overlay import RecordingOverlay
 from permissions import ensure_permissions
@@ -84,10 +85,11 @@ class WhisperMacApp(rumps.App):
         self.transcriber = Transcriber(MODEL_PATH)
         self.overlay     = RecordingOverlay()
 
-        self._is_recording = False
-        self._fn_pressed   = False
-        self.language      = None
-        self._history      = []   # letzte Transkriptionen (neueste zuerst)
+        self._is_recording  = False
+        self._fn_pressed    = False
+        self.language       = None
+        self._history       = []   # letzte Transkriptionen (neueste zuerst)
+        self._f13_last_tap  = 0.0
 
         # ── Status-Zeile ──────────────────────────────────────────────────
         self._status_item = rumps.MenuItem("Lade Modell…")
@@ -164,8 +166,19 @@ class WhisperMacApp(rumps.App):
                 if event_type == kCGEventKeyDown:
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
                     if kc == F13_KEYCODE:
-                        self._delete_last_word()
-                        return None  # F13 unterdrücken
+                        now = time.time()
+                        if now - self._f13_last_tap < 0.4:
+                            self._f13_last_tap = 0.0
+                            self._delete_last_word()
+                            self._delete_last_word()
+                            self._delete_last_word()
+                        else:
+                            self._f13_last_tap = now
+                            self._delete_last_word()
+                        return None
+                    if kc == F14_KEYCODE:
+                        self._undo()
+                        return None
                 else:
                     flags   = CGEventGetFlags(event)
                     fn_down = bool(flags & FN_FLAG)
@@ -292,6 +305,17 @@ class WhisperMacApp(rumps.App):
         CGEventPost(kCGHIDEventTap, down)
         up = CGEventCreateKeyboardEvent(None, KEY_DELETE, False)
         CGEventSetFlags(up, kCGEventFlagMaskAlternate)
+        CGEventPost(kCGHIDEventTap, up)
+
+    def _undo(self):
+        """Schickt Cmd+Z direkt über Quartz."""
+        from Quartz import kCGEventFlagMaskCommand
+        KEY_Z = 6
+        down = CGEventCreateKeyboardEvent(None, KEY_Z, True)
+        CGEventSetFlags(down, kCGEventFlagMaskCommand)
+        CGEventPost(kCGHIDEventTap, down)
+        up = CGEventCreateKeyboardEvent(None, KEY_Z, False)
+        CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, up)
 
     # ── Sprache ───────────────────────────────────────────────────────────
