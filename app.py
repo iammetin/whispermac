@@ -210,6 +210,7 @@ class WhisperMacApp(rumps.App):
         super().__init__("", quit_button=None)
         self.icon     = MENUBAR_ICON
         self.template = True   # passt sich Dark/Light Mode an
+        self._setup_edit_menu()
 
         self.recorder    = AudioRecorder()
         self.transcriber = Transcriber(MODEL_PATH)
@@ -304,6 +305,41 @@ class WhisperMacApp(rumps.App):
 
         # Erst Berechtigungen prüfen, dann Modell laden
         ensure_permissions(self._on_permissions_granted)
+
+    # ── Edit-Menü (ermöglicht Cmd+V/C/X/Z in Textfeldern) ────────────────
+
+    def _setup_edit_menu(self):
+        app      = AppKit.NSApplication.sharedApplication()
+        mainMenu = AppKit.NSMenu.alloc().init()
+
+        # Erstes Element muss App-Menü sein (macOS-Konvention)
+        app_item = AppKit.NSMenuItem.alloc().init()
+        mainMenu.addItem_(app_item)
+
+        # Edit-Menü
+        edit_item = AppKit.NSMenuItem.alloc().init()
+        edit_menu = AppKit.NSMenu.alloc().initWithTitle_("Edit")
+
+        def _add(title, action, key, extra_mask=0):
+            item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title, action, key
+            )
+            item.setKeyEquivalentModifierMask_(
+                AppKit.NSEventModifierFlagCommand | extra_mask
+            )
+            edit_menu.addItem_(item)
+
+        _add("Undo",       "undo:",      "z")
+        _add("Redo",       "redo:",      "z", AppKit.NSEventModifierFlagShift)
+        edit_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        _add("Cut",        "cut:",       "x")
+        _add("Copy",       "copy:",      "c")
+        _add("Paste",      "paste:",     "v")
+        _add("Select All", "selectAll:", "a")
+
+        edit_item.setSubmenu_(edit_menu)
+        mainMenu.addItem_(edit_item)
+        app.setMainMenu_(mainMenu)
 
     # ── Modell laden ──────────────────────────────────────────────────────
 

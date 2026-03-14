@@ -4,7 +4,10 @@ Trigger-Phrasen in der Transkription → Tastenkombinationen ausführen
 """
 import json
 import os
+import subprocess
 import time
+
+import AppKit
 
 from Quartz import (
     CGEventCreateKeyboardEvent,
@@ -76,15 +79,37 @@ def _send_key(keycode: int, flags: int = 0) -> None:
     CGEventPost(kCGHIDEventTap, up)
 
 
+def _paste_text(text: str) -> None:
+    """Fügt beliebigen Text über die Zwischenablage ein."""
+    pb = AppKit.NSPasteboard.generalPasteboard()
+    saved = pb.stringForType_(AppKit.NSPasteboardTypeString)
+    pb.clearContents()
+    pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+    time.sleep(0.05)
+    subprocess.run([
+        "osascript", "-e",
+        'tell application "System Events" to keystroke "v" using command down',
+    ])
+    if saved:
+        time.sleep(0.1)
+        pb.clearContents()
+        pb.setString_forType_(saved, AppKit.NSPasteboardTypeString)
+
+
 def execute_action(action_str: str) -> None:
     """
     Führt eine Aktion aus. Format: 'enter', 'cmd+b', 'enter,enter', 'cmd+shift+k'
     Mehrere Aktionen durch Komma trennen.
+    Sonderformat: 'text:•' fügt beliebigen Text ein.
     """
-    for keystroke in action_str.split(","):
-        keystroke = keystroke.strip().lower()
-        if not keystroke:
+    for raw in action_str.split(","):
+        if not raw.strip():
             continue
+        if raw.strip().lower().startswith("text:"):
+            _paste_text(raw.lstrip()[5:])  # führende Spaces entfernen, Rest behalten
+            time.sleep(0.05)
+            continue
+        keystroke = raw.strip().lower()
         parts = keystroke.split("+")
         key   = parts[-1]
         mods  = parts[:-1]
