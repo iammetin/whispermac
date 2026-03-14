@@ -29,4 +29,20 @@ def apply_shortcuts(text: str, shortcuts: dict) -> str:
         replacement = shortcuts[word]
         if word:
             text = re.sub(re.escape(word), replacement, text, flags=re.IGNORECASE)
+    return _clean_duplicate_punctuation(text)
+
+
+def _clean_duplicate_punctuation(text: str) -> str:
+    """Bereinigt Satzzeichen-Kollisionen zwischen Whisper-Auto-Interpunktion und Kürzeln.
+    Whisper fügt oft Kommas um Pausen ein – diese werden entfernt wenn ein
+    anderes Satzzeichen direkt daneben steht.
+    """
+    # Komma VOR einem anderen Satzzeichen entfernen: ", :" → ":"
+    text = re.sub(r',\s*([\.!?;:])', r'\1', text)
+    # Komma NACH einem anderen Satzzeichen entfernen: ":," → ":"
+    text = re.sub(r'([\.!?;:])\s*,', r'\1', text)
+    # Gleiches Satzzeichen doppelt (mit Leerzeichen): ". ." → "."
+    text = re.sub(r'([\.!?;:])\s+\1', r'\1', text)
+    # Doppelkomma: ", ," → ","
+    text = re.sub(r',\s+,', ',', text)
     return text

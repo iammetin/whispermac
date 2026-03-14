@@ -265,7 +265,6 @@ class WhisperMacApp(rumps.App):
         try:
             text = self.transcriber.transcribe(audio, language=self.language)
             if text and not self._is_hallucination(text):
-                text = apply_shortcuts(text, load_shortcuts())
                 self._insert_with_workflows(text)
                 self._add_to_history(text)
         finally:
@@ -275,14 +274,17 @@ class WhisperMacApp(rumps.App):
     # ── Text einfügen (mit Workflow-Unterstützung) ────────────────────────
 
     def _insert_with_workflows(self, text: str):
+        # Workflows zuerst auf Original-Text (verhindert rstrip-Konflikt mit Kürzeln)
         workflows = load_workflows()
         segments  = split_by_triggers(text, workflows)
+        shortcuts = load_shortcuts()
 
         pb      = AppKit.NSPasteboard.generalPasteboard()
         saved   = pb.stringForType_(AppKit.NSPasteboardTypeString)
 
         for i, (seg_text, workflow) in enumerate(segments):
-            is_last = (i == len(segments) - 1)
+            is_last   = (i == len(segments) - 1)
+            seg_text  = apply_shortcuts(seg_text, shortcuts)
             to_insert = (seg_text + " ") if (seg_text and is_last) else seg_text
             if to_insert:
                 pb.clearContents()
