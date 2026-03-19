@@ -23,4 +23,8 @@ class Transcriber:
             task=task,
             word_timestamps=False,
         )
-        return result.get("text", "").strip()
+        text = result.get("text", "").strip()
+        # Abschließenden Punkt entfernen den Whisper automatisch hinzufügt
+        if text.endswith("."):
+            text = text[:-1].rstrip()
+        return text
