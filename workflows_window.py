@@ -6,7 +6,7 @@ import objc
 from workflows import load_workflows, save_workflows
 
 _HELP = (
-    "Aktions-Format:  enter  ·  tab  ·  cmd+b  ·  cmd+shift+k  ·  enter,enter\n"
+    "Aktion/Danach:  enter  ·  tab  ·  cmd+b  ·  cmd+shift+k  ·  enter,enter  ·  text:• \n"
     "Modifier: cmd  shift  opt  ctrl      Tasten: enter tab space delete a-z 0-9 left right up down"
 )
 
@@ -42,11 +42,13 @@ class _WorkflowTableDS(AppKit.NSObject):
         return len(self._filtered)
 
     def tableView_objectValueForTableColumn_row_(self, tv, col, row):
-        key = "trigger" if str(col.identifier()) == "trigger" else "action"
+        ident = str(col.identifier())
+        key = "trigger" if ident == "trigger" else ("after" if ident == "after" else "action")
         return self._filtered[row].get(key, "")
 
     def tableView_setObjectValue_forTableColumn_row_(self, tv, val, col, row):
-        key = "trigger" if str(col.identifier()) == "trigger" else "action"
+        ident = str(col.identifier())
+        key = "trigger" if ident == "trigger" else ("after" if ident == "after" else "action")
         self._filtered[row][key] = val or ""
         self._save()
 
@@ -84,7 +86,7 @@ class WorkflowsWindowController(AppKit.NSObject):
     # ── Fenster aufbauen ──────────────────────────────────────────────────
 
     def _build(self):
-        W, H     = 600, 460
+        W, H     = 760, 460
         TOP_H    = 52
         HELP_H   = 48
         BOTTOM_H = 44
@@ -140,20 +142,27 @@ class WorkflowsWindowController(AppKit.NSObject):
         )
 
         col1 = AppKit.NSTableColumn.alloc().initWithIdentifier_("trigger")
-        col1.headerCell().setTitle_("Trigger-Phrase (was du sagst)")
-        col1.setWidth_(260)
+        col1.headerCell().setTitle_("Trigger (was du sagst)")
+        col1.setWidth_(220)
         col1.setEditable_(True)
         col1.setResizingMask_(AppKit.NSTableColumnUserResizingMask)
         table.addTableColumn_(col1)
 
         col2 = AppKit.NSTableColumn.alloc().initWithIdentifier_("action")
-        col2.headerCell().setTitle_("Aktion")
+        col2.headerCell().setTitle_("Aktion (vor dem Text)")
+        col2.setWidth_(220)
         col2.setEditable_(True)
-        col2.setResizingMask_(
+        col2.setResizingMask_(AppKit.NSTableColumnUserResizingMask)
+        table.addTableColumn_(col2)
+
+        col3 = AppKit.NSTableColumn.alloc().initWithIdentifier_("after")
+        col3.headerCell().setTitle_("Danach (nach dem Text)")
+        col3.setEditable_(True)
+        col3.setResizingMask_(
             AppKit.NSTableColumnUserResizingMask |
             AppKit.NSTableColumnAutoresizingMask
         )
-        table.addTableColumn_(col2)
+        table.addTableColumn_(col3)
 
         ds = _WorkflowTableDS.alloc().init()
         ds.reload()

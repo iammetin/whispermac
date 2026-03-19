@@ -574,6 +574,7 @@ class WhisperMacApp(rumps.App):
             after_sentence_end   = self._last_insert_ends_with_sentence
 
         last_seg = ""
+        pending_after = ""   # "Danach"-Aktion des vorherigen Workflows
         for i, (seg_text, workflow) in enumerate(segments):
             seg_text = apply_shortcuts(seg_text, shortcuts)
             if seg_text and i == 0:
@@ -592,10 +593,21 @@ class WhisperMacApp(rumps.App):
                     'tell application "System Events" to keystroke "v" using command down',
                 ])
                 last_seg = to_insert
+            # "Danach"-Aktion des vorherigen Segments ausführen (läuft nach dem Text)
+            if pending_after:
+                time.sleep(0.08)
+                execute_action(pending_after)
+                time.sleep(0.08)
+                pending_after = ""
             if workflow:
                 time.sleep(0.08)
                 execute_action(workflow.get("action", ""))
                 time.sleep(0.08)
+                pending_after = workflow.get("after", "")
+        # Letztes "Danach" ausführen
+        if pending_after:
+            time.sleep(0.08)
+            execute_action(pending_after)
 
         if last_seg:
             self._last_insert_ends_with_word     = last_seg[-1] not in (" ", "\n", "\t", "\r")
