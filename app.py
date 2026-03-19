@@ -10,6 +10,7 @@ from deep_translator import GoogleTranslator
 import sys
 import threading
 import time
+import objc
 
 # Frühes Logging – damit wir sehen was beim Start passiert
 import logging
@@ -108,11 +109,37 @@ TRANSLATE_OPTIONS = [
 
 
 def _list_input_devices():
-    """Gibt Liste von (index, name) aller Mikrofon-Geräte zurück."""
-    result = []
+    """Gibt Liste von (index, name) aller Mikrofon-Geräte zurück.
+
+    Nutzt AVFoundation für die Geräteliste (kein Cache, immer aktuell) und
+    sounddevice für die Aufnahme-Indizes. Wenn PortAudio ein Gerät noch nicht
+    kennt, wird idx=None zurückgegeben → Aufnahme läuft dann über System-Standard.
+    """
+    # sounddevice-Indizes (PortAudio, ggf. veraltet bei neuen BT-Geräten)
+    sd_map: dict[str, int] = {}
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0:
-            result.append((i, d["name"]))
+            sd_map[d["name"]] = i
+    # AVFoundation: immer frische Geräteliste direkt aus macOS
+    try:
+        from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
+        av_names = [
+            str(d.localizedName())
+            for d in AVCaptureDevice.devicesWithMediaType_(AVMediaTypeAudio)
+        ]
+    except Exception:
+        return [(idx, name) for name, idx in sd_map.items()]
+
+    result = []
+    for name in av_names:
+        idx = sd_map.get(name)
+        if idx is None:
+            # Teilübereinstimmung (PortAudio kürzt manchmal lange Namen)
+            for sd_name, sd_idx in sd_map.items():
+                if name in sd_name or sd_name in name:
+                    idx = sd_idx
+                    break
+        result.append((idx, name))
     return result
 
 
@@ -205,6 +232,14 @@ class _TranscriptionSpinner:
         self._spinner = spinner
 
 
+class _AppMenuDelegate(AppKit.NSObject):
+    """Feuert wenn das Statusleisten-Menü geöffnet wird."""
+
+    def menuWillOpen_(self, menu):
+        if hasattr(self, '_app'):
+            self._app._refresh_mic_menu()
+
+
 class WhisperMacApp(rumps.App):
 
     def __init__(self):
@@ -287,6 +322,11 @@ class WhisperMacApp(rumps.App):
                      None,
                      rumps.MenuItem("Beenden", callback=rumps.quit_application)])
         self.menu = menu
+
+        # Delegate auf das Hauptmenü – feuert beim Öffnen des Statusleisten-Menüs
+        self._menu_delegate = _AppMenuDelegate.alloc().init()
+        self._menu_delegate._app = self
+        self._menu._menu.setDelegate_(self._menu_delegate)
 
         # Verlauf initial ausblenden
         self._hist_header._menuitem.setHidden_(True)
@@ -850,6 +890,50 @@ end tell"""])
                 self._lang_menu_items[code]._menuitem.setState_(1)
                 self._save_settings()
                 break
+
+    def _refresh_mic_menu(self):
+        """Aktualisiert die Mikrofonliste (neue Geräte hinzufügen, verschwundene entfernen)."""
+        if not self._is_recording:
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception:
+                pass
+        current = {name: idx for idx, name in _list_input_devices()}
+
+        # Index aktualisieren (kann sich nach Reconnect ändern)
+        for name, idx in current.items():
+            if name in self._mic_menu_items:
+                old_idx, item = self._mic_menu_items[name]
+                if old_idx != idx:
+                    self._mic_menu_items[name] = (idx, item)
+                    if self._mic_device_name == name:
+                        self._mic_device_idx = idx
+
+        # Neue Geräte hinzufügen
+        for name, idx in current.items():
+            if name not in self._mic_menu_items:
+                item = rumps.MenuItem(name, callback=self._on_mic_select)
+                self._mic_submenu[name] = item
+                self._mic_menu_items[name] = (idx, item)
+                if name == self._mic_device_name:
+                    # Alle anderen Häkchen entfernen, dann dieses setzen
+                    for _, (_, it) in self._mic_menu_items.items():
+                        it._menuitem.setState_(0)
+                    item._menuitem.setState_(1)
+                    self._mic_device_idx = idx
+
+        # Verschwundene Geräte entfernen
+        for name in list(self._mic_menu_items.keys()):
+            if name == "System (Standard)":
+                continue
+            if name not in current:
+                del self._mic_submenu[name]   # entfernt aus NSMenu UND rumps-internem Dict
+                del self._mic_menu_items[name]
+                if self._mic_device_name == name:
+                    self._mic_device_name = None
+                    self._mic_device_idx  = None
+                    self._mic_menu_items["System (Standard)"][1]._menuitem.setState_(1)
 
     def _on_mic_select(self, sender):
         for name, (idx, item) in self._mic_menu_items.items():
