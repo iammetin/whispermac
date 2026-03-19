@@ -231,6 +231,7 @@ class WhisperMacApp(rumps.App):
         self._f13_hold_timer     = None
         self._f13_hold_triggered = False
         self._f13_last_was_hold  = False
+        self._f15_tap_timer      = None   # Timer für Doppelklick-Erkennung
         self._transcribe_lock = threading.Lock()
         self._shortcuts_win   = ShortcutsWindowController.alloc().init()
         self._workflows_win   = WorkflowsWindowController.alloc().init()
@@ -281,8 +282,8 @@ class WhisperMacApp(rumps.App):
         menu = [self._status_item, None, self._hist_header]
         menu.extend(self._history_items)
         menu.extend([None, self._mic_submenu, self._lang_submenu, self._translate_submenu,
-                     rumps.MenuItem("Kürzel…",    callback=self._on_shortcuts),
-                     rumps.MenuItem("Workflows…", callback=self._on_workflows),
+                     rumps.MenuItem("Kürzel…  (F15)",         callback=self._on_shortcuts),
+                     rumps.MenuItem("Workflows…  (F15 F15)", callback=self._on_workflows),
                      None,
                      rumps.MenuItem("Beenden", callback=rumps.quit_application)])
         self.menu = menu
@@ -410,9 +411,27 @@ class WhisperMacApp(rumps.App):
                         self._undo()
                         return None
                     if kc == F15_KEYCODE:
-                        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
-                            self._shortcuts_win.show
-                        )
+                        def _handle_f15():
+                            # Alles auf dem Main Thread – AppKit-Zugriffe nur hier
+                            if self._shortcuts_win.is_open() or self._workflows_win.is_open():
+                                self._shortcuts_win.close()
+                                self._workflows_win.close()
+                                return
+                            if self._f15_tap_timer is not None:
+                                # Zweiter Klick innerhalb 350ms → Workflows öffnen
+                                self._f15_tap_timer.cancel()
+                                self._f15_tap_timer = None
+                                self._workflows_win.show()
+                            else:
+                                # Erster Klick → kurz warten ob zweiter kommt
+                                def _open_shortcuts():
+                                    self._f15_tap_timer = None
+                                    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                                        self._shortcuts_win.show
+                                    )
+                                self._f15_tap_timer = threading.Timer(0.35, _open_shortcuts)
+                                self._f15_tap_timer.start()
+                        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_handle_f15)
                         return None
                 elif event_type == kCGEventKeyUp:
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)

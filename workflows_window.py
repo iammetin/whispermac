@@ -74,6 +74,13 @@ class WorkflowsWindowController(AppKit.NSObject):
         self._search_field = None
         return self
 
+    def is_open(self):
+        return self._win is not None and self._win.isVisible()
+
+    def close(self):
+        if self._win is not None:
+            self._win.orderOut_(None)
+
     def show(self):
         if self._win is None:
             self._build()
