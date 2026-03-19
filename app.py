@@ -524,6 +524,8 @@ class WhisperMacApp(rumps.App):
             return
 
         try:
+            if self._is_silence(audio):
+                return
             text = self.transcriber.transcribe(audio, language=self.language)
             if text and self._translate_to:
                 text = GoogleTranslator(
@@ -716,12 +718,41 @@ class WhisperMacApp(rumps.App):
     # ── Halluzinations-Filter ─────────────────────────────────────────────
 
     _HALLUCINATIONS = {
-        "thank you", "thank you.", "thanks for watching", "thanks for watching.",
+        # Englisch
+        "thank you", "thanks", "thank you.", "thanks.",
+        "thanks for watching", "thanks for watching.",
         "thank you for watching", "thank you for watching.",
+        "you", "bye", "bye.", "goodbye", "goodbye.",
+        "please", "please.",
+        # Deutsch
+        "vielen dank", "vielen dank.", "vielen dank!",
+        "danke", "danke.", "danke schön", "danke schön.",
+        "bitte", "bitte.", "tschüss", "tschüss.",
+        "auf wiedersehen", "auf wiedersehen.",
+        "ja", "ja.", "nein", "nein.", "ok", "ok.",
+        # Untertitel-Halluzinationen
+        "untertitel",
+        "subtitles by",
+        "© 2",
     }
 
     def _is_hallucination(self, text: str) -> bool:
-        return text.strip().lower() in self._HALLUCINATIONS
+        t = text.strip().lower()
+        # Exakter Treffer
+        if t in self._HALLUCINATIONS:
+            return True
+        # Beginnt mit bekannten Untertitel-Phrasen
+        for h in self._HALLUCINATIONS:
+            if t.startswith(h) and len(t) < len(h) + 10:
+                return True
+        return False
+
+    _SILENCE_RMS_THRESHOLD = 0.01   # Werte darunter gelten als Stille
+
+    def _is_silence(self, audio) -> bool:
+        import numpy as np
+        rms = float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)))
+        return rms < self._SILENCE_RMS_THRESHOLD
 
     def _on_f13_hold(self):
         self._f13_hold_triggered = True
