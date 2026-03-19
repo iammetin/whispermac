@@ -79,21 +79,48 @@ def _send_key(keycode: int, flags: int = 0) -> None:
     CGEventPost(kCGHIDEventTap, up)
 
 
-def _paste_text(text: str) -> None:
-    """Fügt beliebigen Text über die Zwischenablage ein."""
-    pb = AppKit.NSPasteboard.generalPasteboard()
-    saved = pb.stringForType_(AppKit.NSPasteboardTypeString)
-    pb.clearContents()
-    pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
-    time.sleep(0.05)
+def _do_paste() -> None:
     subprocess.run([
         "osascript", "-e",
         'tell application "System Events" to keystroke "v" using command down',
     ])
+
+
+def _paste_text(text: str) -> None:
+    """Fügt beliebigen Text über die Zwischenablage ein."""
+    pb    = AppKit.NSPasteboard.generalPasteboard()
+    saved = pb.stringForType_(AppKit.NSPasteboardTypeString)
+    pb.clearContents()
+    pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+    time.sleep(0.05)
+    _do_paste()
     if saved:
         time.sleep(0.1)
         pb.clearContents()
         pb.setString_forType_(saved, AppKit.NSPasteboardTypeString)
+
+
+def paste_html(html: str) -> None:
+    """Fügt HTML als Rich Text ein – Word Online, Google Docs etc. rendern es formatiert."""
+    import re as _re
+    pb         = AppKit.NSPasteboard.generalPasteboard()
+    saved_str  = pb.stringForType_(AppKit.NSPasteboardTypeString)
+    saved_html = pb.stringForType_(AppKit.NSPasteboardTypeHTML)
+
+    plain = _re.sub(r'<[^>]+>', '', html)
+    pb.clearContents()
+    pb.setString_forType_(html,  AppKit.NSPasteboardTypeHTML)
+    pb.setString_forType_(plain, AppKit.NSPasteboardTypeString)
+    time.sleep(0.05)
+    _do_paste()
+
+    if saved_str or saved_html:
+        time.sleep(0.1)
+        pb.clearContents()
+        if saved_html:
+            pb.setString_forType_(saved_html, AppKit.NSPasteboardTypeHTML)
+        if saved_str:
+            pb.setString_forType_(saved_str, AppKit.NSPasteboardTypeString)
 
 
 def execute_action(action_str: str) -> None:
@@ -106,7 +133,11 @@ def execute_action(action_str: str) -> None:
         if not raw.strip():
             continue
         if raw.strip().lower().startswith("text:"):
-            _paste_text(raw.lstrip()[5:])  # führende Spaces entfernen, Rest behalten
+            _paste_text(raw.lstrip()[5:])
+            time.sleep(0.05)
+            continue
+        if raw.strip().lower().startswith("html:"):
+            paste_html(raw.lstrip()[5:])
             time.sleep(0.05)
             continue
         keystroke = raw.strip().lower()

@@ -5,10 +5,16 @@ import AppKit
 import objc
 from workflows import load_workflows, save_workflows
 
-_HELP = (
-    "Aktion/Danach:  enter  ·  tab  ·  cmd+b  ·  cmd+shift+k  ·  enter,enter  ·  text:• \n"
-    "Modifier: cmd  shift  opt  ctrl      Tasten: enter tab space delete a-z 0-9 left right up down"
-)
+_HELP = """\
+Du sagst: Trigger-Wort + dein Text.   Aktion läuft VOR deinem Text,  Danach läuft DAHINTER.
+
+  Trigger       Aktion                          Danach    →  du sagst z.B. „bullet Milch kaufen"
+  bullet        enter,text:•                              →  neue Zeile + • Milch kaufen
+  neue zeile    enter                                     →  Zeilenumbruch, dann: Milch kaufen
+  fett          html:<b>|</b>                             →  Milch kaufen  (fett, in Word/Browser)
+  liste         html:<ul><li>|</li></ul>                  →  echtes Listen-Element in Word/Browser
+  klammer       text:(                         text:)     →  (Milch kaufen)\
+"""
 
 
 class _WorkflowTableDS(AppKit.NSObject):
@@ -86,9 +92,9 @@ class WorkflowsWindowController(AppKit.NSObject):
     # ── Fenster aufbauen ──────────────────────────────────────────────────
 
     def _build(self):
-        W, H     = 760, 460
+        W, H     = 760, 520
         TOP_H    = 52
-        HELP_H   = 48
+        HELP_H   = 108
         BOTTOM_H = 44
 
         win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -170,21 +176,41 @@ class WorkflowsWindowController(AppKit.NSObject):
         scroll.setDocumentView_(table)
         cv.addSubview_(scroll)
 
-        # ── Hilfe-Box ──────────────────────────────────────────────────────
+        # ── Hilfe-Box (scrollbar) ──────────────────────────────────────────
         _sep(cv, 0, BOTTOM_H + HELP_H - 1, W)
 
-        help_box = AppKit.NSTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(12, BOTTOM_H + 6, W - 24, HELP_H - 10)
+        help_scroll = AppKit.NSScrollView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, BOTTOM_H, W, HELP_H - 1)
         )
-        help_box.setStringValue_(_HELP)
-        help_box.setFont_(AppKit.NSFont.monospacedSystemFontOfSize_weight_(10.5, 0))
-        help_box.setTextColor_(AppKit.NSColor.secondaryLabelColor())
-        help_box.setBezeled_(False)
-        help_box.setDrawsBackground_(False)
-        help_box.setEditable_(False)
-        help_box.setSelectable_(True)
-        help_box.setAutoresizingMask_(AppKit.NSViewWidthSizable)
-        cv.addSubview_(help_box)
+        help_scroll.setHasVerticalScroller_(True)
+        help_scroll.setAutohidesScrollers_(True)
+        help_scroll.setBorderType_(AppKit.NSNoBorder)
+        help_scroll.setDrawsBackground_(False)
+        help_scroll.setAutoresizingMask_(
+            AppKit.NSViewWidthSizable | AppKit.NSViewMinYMargin
+        )
+
+        font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(11.0, 0)
+        attrs = {
+            AppKit.NSFontAttributeName:            font,
+            AppKit.NSForegroundColorAttributeName: AppKit.NSColor.secondaryLabelColor(),
+        }
+        astr = AppKit.NSAttributedString.alloc().initWithString_attributes_(
+            _HELP, attrs
+        )
+
+        help_tv = AppKit.NSTextView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, W, HELP_H - 1)
+        )
+        help_tv.textStorage().setAttributedString_(astr)
+        help_tv.setEditable_(False)
+        help_tv.setSelectable_(True)
+        help_tv.setDrawsBackground_(False)
+        help_tv.textContainer().setLineFragmentPadding_(8)
+        help_tv.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+
+        help_scroll.setDocumentView_(help_tv)
+        cv.addSubview_(help_scroll)
 
         # ── Toolbar (unten) ────────────────────────────────────────────────
         _sep(cv, 0, BOTTOM_H - 1, W)

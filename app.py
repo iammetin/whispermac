@@ -57,6 +57,7 @@ kCGDirectMainDisplay = 0
 
 F13_KEYCODE = 105
 F14_KEYCODE = 179
+F15_KEYCODE = 113
 
 from overlay import RecordingOverlay
 from permissions import ensure_permissions
@@ -64,7 +65,7 @@ from recorder import AudioRecorder
 from shortcuts import apply_shortcuts, load_shortcuts
 from shortcuts_window import ShortcutsWindowController
 from transcriber import Transcriber
-from workflows import execute_action, load_workflows, split_by_triggers
+from workflows import execute_action, load_workflows, paste_html, split_by_triggers
 from workflows_window import WorkflowsWindowController
 
 # Pfade: funktioniert sowohl als Skript als auch als gebaute .app
@@ -408,6 +409,11 @@ class WhisperMacApp(rumps.App):
                     if kc == F14_KEYCODE:
                         self._undo()
                         return None
+                    if kc == F15_KEYCODE:
+                        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                            self._shortcuts_win.show
+                        )
+                        return None
                 elif event_type == kCGEventKeyUp:
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
                     if kc == F13_KEYCODE:
@@ -573,38 +579,61 @@ class WhisperMacApp(rumps.App):
             needs_leading_space  = self._last_insert_ends_with_word
             after_sentence_end   = self._last_insert_ends_with_sentence
 
-        last_seg = ""
-        pending_after = ""   # "Danach"-Aktion des vorherigen Workflows
+        last_seg     = ""
+        pending_after = ""
+        pending_wrap  = None   # (pre_html, post_html) für html:...|...-Modus
+
         for i, (seg_text, workflow) in enumerate(segments):
             seg_text = apply_shortcuts(seg_text, shortcuts)
-            if seg_text and i == 0:
+            # Smart-Space + Großschreibung nur für erstes Segment (ohne wrap)
+            if seg_text and i == 0 and pending_wrap is None:
                 if needs_leading_space:
                     seg_text = " " + seg_text
                 if after_sentence_end and seg_text.lstrip() and seg_text.lstrip()[0].islower():
                     stripped = seg_text.lstrip()
                     seg_text = seg_text[: len(seg_text) - len(stripped)] + stripped[0].upper() + stripped[1:]
-            to_insert = seg_text
-            if to_insert:
+
+            if pending_wrap is not None and seg_text:
+                # Text in HTML-Wrapper einfügen – alles als ein einziger Paste
+                pre, post = pending_wrap
+                paste_html(pre + seg_text + post)
+                last_seg     = seg_text
+                pending_wrap = None
+            elif seg_text:
                 pb.clearContents()
-                pb.setString_forType_(to_insert, AppKit.NSPasteboardTypeString)
+                pb.setString_forType_(seg_text, AppKit.NSPasteboardTypeString)
                 time.sleep(0.05)
                 subprocess.run([
                     "osascript", "-e",
                     'tell application "System Events" to keystroke "v" using command down',
                 ])
-                last_seg = to_insert
-            # "Danach"-Aktion des vorherigen Segments ausführen (läuft nach dem Text)
+                last_seg = seg_text
+
             if pending_after:
                 time.sleep(0.08)
                 execute_action(pending_after)
                 time.sleep(0.08)
                 pending_after = ""
+
             if workflow:
-                time.sleep(0.08)
-                execute_action(workflow.get("action", ""))
-                time.sleep(0.08)
-                pending_after = workflow.get("after", "")
-        # Letztes "Danach" ausführen
+                action = workflow.get("action", "")
+                after  = workflow.get("after", "")
+                if action.strip().lower().startswith("html:") and "|" in action:
+                    # Wrap-Modus: text wird in HTML eingebettet
+                    html_tpl      = action.strip()[5:]
+                    pre, _, post  = html_tpl.partition("|")
+                    pending_wrap  = (pre, post)
+                    pending_after = after
+                else:
+                    time.sleep(0.08)
+                    execute_action(action)
+                    time.sleep(0.08)
+                    pending_after = after
+
+        if pending_wrap is not None:
+            # Trigger am Ende ohne Folgetext → leeres HTML einfügen
+            pre, post = pending_wrap
+            paste_html(pre + post)
         if pending_after:
             time.sleep(0.08)
             execute_action(pending_after)
