@@ -606,13 +606,19 @@ class WhisperMacApp(rumps.App):
 
         for i, (seg_text, workflow) in enumerate(segments):
             seg_text = apply_shortcuts(seg_text, shortcuts)
-            # Smart-Space + Großschreibung nur für erstes Segment (ohne wrap)
+            # Smart-Space + Großschreibung: erstes Segment
             if seg_text and i == 0 and pending_wrap is None:
                 if needs_leading_space:
                     seg_text = " " + seg_text
                 if after_sentence_end and seg_text.lstrip() and seg_text.lstrip()[0].islower():
                     stripped = seg_text.lstrip()
                     seg_text = seg_text[: len(seg_text) - len(stripped)] + stripped[0].upper() + stripped[1:]
+            # Folgesegmente: Leerzeichen einfügen wenn kein Zeilenumbruch dazwischen
+            elif seg_text and i > 0 and last_seg and last_seg[-1] not in (" ", "\n", "\t", "\r"):
+                prev_wf = segments[i - 1][1]
+                prev_action = (prev_wf.get("action", "") if prev_wf else "").lower()
+                if not any(k in prev_action for k in ("enter", "return")):
+                    seg_text = " " + seg_text
 
             if pending_wrap is not None and seg_text:
                 # Text in HTML-Wrapper einfügen – alles als ein einziger Paste
@@ -664,9 +670,11 @@ class WhisperMacApp(rumps.App):
             self._last_insert_ends_with_sentence = last_seg[-1] in (".", "!", "?")
 
         if saved:
-            time.sleep(0.15)
-            pb.clearContents()
-            pb.setString_forType_(saved, AppKit.NSPasteboardTypeString)
+            def _restore_clipboard(s=saved):
+                time.sleep(1.0)
+                pb.clearContents()
+                pb.setString_forType_(s, AppKit.NSPasteboardTypeString)
+            threading.Thread(target=_restore_clipboard, daemon=True).start()
 
     def _insert_text(self, text: str):
         pb = AppKit.NSPasteboard.generalPasteboard()

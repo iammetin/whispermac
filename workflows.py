@@ -5,6 +5,7 @@ Trigger-Phrasen in der Transkription → Tastenkombinationen ausführen
 import json
 import os
 import subprocess
+import threading
 import time
 
 import AppKit
@@ -95,9 +96,11 @@ def _paste_text(text: str) -> None:
     time.sleep(0.05)
     _do_paste()
     if saved:
-        time.sleep(0.1)
-        pb.clearContents()
-        pb.setString_forType_(saved, AppKit.NSPasteboardTypeString)
+        def _restore(s=saved):
+            time.sleep(1.0)
+            pb.clearContents()
+            pb.setString_forType_(s, AppKit.NSPasteboardTypeString)
+        threading.Thread(target=_restore, daemon=True).start()
 
 
 def paste_html(html: str) -> None:
@@ -115,12 +118,14 @@ def paste_html(html: str) -> None:
     _do_paste()
 
     if saved_str or saved_html:
-        time.sleep(0.1)
-        pb.clearContents()
-        if saved_html:
-            pb.setString_forType_(saved_html, AppKit.NSPasteboardTypeHTML)
-        if saved_str:
-            pb.setString_forType_(saved_str, AppKit.NSPasteboardTypeString)
+        def _restore(ss=saved_str, sh=saved_html):
+            time.sleep(1.0)
+            pb.clearContents()
+            if sh:
+                pb.setString_forType_(sh, AppKit.NSPasteboardTypeHTML)
+            if ss:
+                pb.setString_forType_(ss, AppKit.NSPasteboardTypeString)
+        threading.Thread(target=_restore, daemon=True).start()
 
 
 def execute_action(action_str: str) -> None:
