@@ -268,6 +268,7 @@ class WhisperMacApp(rumps.App):
         self._f13_last_was_hold  = False
         self._f15_tap_timer      = None   # Timer für Doppelklick-Erkennung
         self._transcribe_lock = threading.Lock()
+        self._transcription_seq  = 0   # Jeder fn-Druck erhöht diesen Zähler
         self._shortcuts_win   = ShortcutsWindowController.alloc().init()
         self._workflows_win   = WorkflowsWindowController.alloc().init()
 
@@ -536,6 +537,7 @@ class WhisperMacApp(rumps.App):
         if self._is_recording:
             return
         self._is_recording = True
+        self._transcription_seq += 1   # laufende Transkription invalidieren
         self._play_start_sound()
         self._status_item.title = "Aufnahme läuft…"
         self.recorder.start()
@@ -550,7 +552,8 @@ class WhisperMacApp(rumps.App):
         threading.Thread(target=self._transcribe_and_insert, daemon=True).start()
 
     def _transcribe_and_insert(self):
-        audio = self.recorder.stop()
+        my_seq = self._transcription_seq   # Sequenz beim Start merken
+        audio  = self.recorder.stop()
         self._is_recording = False
 
         if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.8):
@@ -558,12 +561,12 @@ class WhisperMacApp(rumps.App):
             self._set_ui(status="Bereit – fn halten zum Aufnehmen")
             return
 
-        if not self._transcribe_lock.acquire(blocking=False):
-            self._spinner.hide()
-            self._set_ui(status="Bereit – fn halten zum Aufnehmen")
-            return
-
+        # Auf vorherige Transkription warten (blockend statt überspringen)
+        self._transcribe_lock.acquire(blocking=True)
         try:
+            # Wurde inzwischen eine neue Aufnahme gestartet? → verwerfen
+            if self._transcription_seq != my_seq:
+                return
             if self._is_silence(audio):
                 return
             text = self.transcriber.transcribe(audio, language=self.language)
@@ -572,7 +575,8 @@ class WhisperMacApp(rumps.App):
                     source=self.language or "auto",
                     target=self._translate_to,
                 ).translate(text) or text
-            if text and not self._is_hallucination(text):
+            # Nochmals prüfen – fn könnte während der Transkription gedrückt worden sein
+            if text and not self._is_hallucination(text) and self._transcription_seq == my_seq:
                 self._insert_with_workflows(text)
                 self._add_to_history(text)
         finally:
