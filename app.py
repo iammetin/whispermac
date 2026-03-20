@@ -570,6 +570,11 @@ class WhisperMacApp(rumps.App):
             if self._is_silence(audio):
                 return
             text = self.transcriber.transcribe(audio, language=self.language)
+            try:
+                import mlx.core as mx
+                mx.metal.clear_cache()
+            except Exception:
+                pass
             if text and self._translate_to:
                 text = GoogleTranslator(
                     source=self.language or "auto",
