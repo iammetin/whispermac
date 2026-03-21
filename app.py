@@ -579,7 +579,7 @@ class WhisperMacApp(rumps.App):
         audio  = self.recorder.stop()
         self._is_recording = False
 
-        if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.8):
+        if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.3):
             self._spinner.hide()
             self._set_ui(status="Bereit – fn halten zum Aufnehmen")
             return
@@ -939,10 +939,12 @@ end tell"""])
 
     def _refresh_mic_menu(self):
         """Aktualisiert die Mikrofonliste (neue Geräte hinzufügen, verschwundene entfernen)."""
+        reinit_done = False
         if not self._is_recording:
             try:
                 sd._terminate()
                 sd._initialize()
+                reinit_done = True
             except Exception:
                 pass
         current = {name: idx for idx, name in _list_input_devices()}
@@ -980,6 +982,14 @@ end tell"""])
                     self._mic_device_name = None
                     self._mic_device_idx  = None
                     self._mic_menu_items["System (Standard)"][1]._menuitem.setState_(1)
+
+        # PortAudio-Reset hat den dauerhaften Stream im Recorder abgerissen →
+        # sofort neu öffnen, damit die nächste Aufnahme ohne Klick funktioniert
+        if reinit_done:
+            try:
+                self.recorder.set_device(self._mic_device_idx)
+            except Exception:
+                pass
 
     def _on_mic_select(self, sender):
         for name, (idx, item) in self._mic_menu_items.items():
