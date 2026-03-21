@@ -65,18 +65,22 @@ from permissions import ensure_permissions
 from recorder import AudioRecorder
 from shortcuts import apply_shortcuts, load_shortcuts
 from shortcuts_window import ShortcutsWindowController
+from corrector import TextCorrector
+from ki_window import KIWindowController, load_ki_settings
 from transcriber import Transcriber
 from workflows import execute_action, load_workflows, paste_html, split_by_triggers
 from workflows_window import WorkflowsWindowController
 
 # Pfade: funktioniert sowohl als Skript als auch als gebaute .app
 if getattr(sys, "frozen", False):
-    MODEL_PATH    = os.path.expanduser("~/WhisperMac/models/whisper-large-v3-turbo")
-    MENUBAR_ICON  = os.path.expanduser("~/WhisperMac/Assets/menubar.png")
+    MODEL_PATH      = os.path.expanduser("~/WhisperMac/models/whisper-large-v3-turbo")
+    CORRECTOR_PATH  = os.path.expanduser("~/WhisperMac/models/Qwen3.5-2b")
+    MENUBAR_ICON    = os.path.expanduser("~/WhisperMac/Assets/menubar.png")
 else:
-    BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
-    MODEL_PATH    = os.path.join(BASE_DIR, "models", "whisper-large-v3-turbo")
-    MENUBAR_ICON  = os.path.join(BASE_DIR, "Assets", "menubar.png")
+    BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
+    MODEL_PATH      = os.path.join(BASE_DIR, "models", "whisper-large-v3-turbo")
+    CORRECTOR_PATH  = os.path.join(BASE_DIR, "models", "Qwen3.5-2b")
+    MENUBAR_ICON    = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
 SETTINGS_FILE = os.path.expanduser("~/.whispermac_settings.json")
 FN_FLAG      = kCGEventFlagMaskSecondaryFn   # 0x800000
@@ -250,6 +254,7 @@ class WhisperMacApp(rumps.App):
 
         self.recorder    = AudioRecorder()
         self.transcriber = Transcriber(MODEL_PATH)
+        self.corrector   = TextCorrector(CORRECTOR_PATH)
         self.overlay     = RecordingOverlay()
         self._spinner    = _TranscriptionSpinner()
 
@@ -257,6 +262,8 @@ class WhisperMacApp(rumps.App):
         self._fn_pressed      = False
         self.language         = self._load_setting("language", None, {c for c,_ in LANG_OPTIONS})
         self._translate_to    = self._load_setting("translate_to", None, {c for c,_ in TRANSLATE_OPTIONS})
+        self._ki_korrektur, ki_prompt = load_ki_settings()
+        self.corrector.system_prompt  = ki_prompt
         self._mic_device_name = self._load_raw_setting("mic_device", None)
         self._mic_device_idx  = None  # wird beim Menü-Aufbau aufgelöst
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
@@ -271,6 +278,8 @@ class WhisperMacApp(rumps.App):
         self._transcription_seq  = 0   # Jeder fn-Druck erhöht diesen Zähler
         self._shortcuts_win   = ShortcutsWindowController.alloc().init()
         self._workflows_win   = WorkflowsWindowController.alloc().init()
+        self._ki_win          = KIWindowController.alloc().init()
+        self._ki_win._on_save = self._on_ki_saved
 
         # ── Status-Zeile ──────────────────────────────────────────────────
         self._status_item = rumps.MenuItem("Lade Modell…")
@@ -314,10 +323,14 @@ class WhisperMacApp(rumps.App):
             if name == self._mic_device_name:
                 self._mic_device_idx = idx
 
+        # ── KI-Korrektur-Toggle ───────────────────────────────────────────
+        self._ki_item = rumps.MenuItem("KI-Korrektur", callback=self._on_ki_toggle)
+
         # ── Menü zusammenbauen ────────────────────────────────────────────
         menu = [self._status_item, None, self._hist_header]
         menu.extend(self._history_items)
         menu.extend([None, self._mic_submenu, self._lang_submenu, self._translate_submenu,
+                     self._ki_item,
                      rumps.MenuItem("Kürzel…  (F15)",         callback=self._on_shortcuts),
                      rumps.MenuItem("Workflows…  (F15 F15)", callback=self._on_workflows),
                      None,
@@ -337,6 +350,8 @@ class WhisperMacApp(rumps.App):
         # Häkchen bei gespeicherter Auswahl setzen
         self._lang_menu_items[self.language]._menuitem.setState_(1)
         self._translate_menu_items[self._translate_to]._menuitem.setState_(1)
+        if self._ki_korrektur:
+            self._ki_item._menuitem.setState_(1)
         saved_mic = self._mic_device_name or "System (Standard)"
         if saved_mic in self._mic_menu_items:
             self._mic_menu_items[saved_mic][1]._menuitem.setState_(1)
@@ -398,7 +413,14 @@ class WhisperMacApp(rumps.App):
     def _preload_model(self):
         self.recorder.warmup(device=self._mic_device_idx)
         self.overlay.prebuild()
+        self._set_ui(status="Lade Whisper-Modell…")
         self.transcriber.preload()
+        if self._ki_korrektur:
+            self._set_ui(status="Lade KI-Korrektor…")
+            try:
+                self.corrector.preload()
+            except Exception as e:
+                logging.exception(f"KI-Korrektor konnte nicht geladen werden: {e}")
         self._set_ui(status="Bereit – fn halten zum Aufnehmen")
         self._start_fn_listener()
         # Kurz "Bereit" neben dem Icon anzeigen, dann wieder ausblenden
@@ -454,9 +476,10 @@ class WhisperMacApp(rumps.App):
                     if kc == F15_KEYCODE:
                         def _handle_f15():
                             # Alles auf dem Main Thread – AppKit-Zugriffe nur hier
-                            if self._shortcuts_win.is_open() or self._workflows_win.is_open():
+                            if self._shortcuts_win.is_open() or self._workflows_win.is_open() or self._ki_win.is_open():
                                 self._shortcuts_win.close()
                                 self._workflows_win.close()
+                                self._ki_win.close()
                                 return
                             if self._f15_tap_timer is not None:
                                 # Zweiter Klick innerhalb 350ms → Workflows öffnen
@@ -575,6 +598,13 @@ class WhisperMacApp(rumps.App):
                 mx.metal.clear_cache()
             except Exception:
                 pass
+            if text and not self._is_hallucination(text) and self._ki_korrektur:
+                self._set_ui(status="Korrigiere…")
+                text = self.corrector.correct(text)
+                try:
+                    mx.metal.clear_cache()
+                except Exception:
+                    pass
             if text and self._translate_to:
                 text = GoogleTranslator(
                     source=self.language or "auto",
@@ -881,12 +911,19 @@ end tell"""])
 
     def _save_settings(self):
         try:
+            try:
+                with open(SETTINGS_FILE, encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+            data.update({
+                "language":     self.language,
+                "translate_to": self._translate_to,
+                "mic_device":   self._mic_device_name,
+                "ki_korrektur": self._ki_korrektur,
+            })
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({
-                    "language":    self.language,
-                    "translate_to": self._translate_to,
-                    "mic_device":  self._mic_device_name,
-                }, f)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
@@ -965,6 +1002,26 @@ end tell"""])
                 self._translate_menu_items[code]._menuitem.setState_(1)
                 self._save_settings()
                 break
+
+    def _on_ki_toggle(self, sender):
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._ki_win.show)
+
+    def _on_ki_saved(self, enabled: bool, prompt: str):
+        """Callback vom KI-Fenster nach 'Speichern'."""
+        self._ki_korrektur = enabled
+        self.corrector.system_prompt = prompt
+        self._ki_item._menuitem.setState_(1 if enabled else 0)
+        # Modell laden falls zum ersten Mal aktiviert
+        if enabled and self.corrector._model is None:
+            threading.Thread(target=self._load_corrector_bg, daemon=True).start()
+
+    def _load_corrector_bg(self):
+        self._set_ui(status="Lade KI-Korrektor…")
+        try:
+            self.corrector.preload()
+        except Exception as e:
+            logging.exception(f"KI-Korrektor konnte nicht geladen werden: {e}")
+        self._set_ui(status="Bereit – fn halten zum Aufnehmen")
 
 
 if __name__ == "__main__":
