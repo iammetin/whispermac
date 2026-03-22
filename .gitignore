@@ -1,16 +1,30 @@
-# Whisper-Modell (zu groß für Git)
-models/
+# ── Modelle (Ordner werden getrackt, Inhalt nicht) ───────────────────────────
+# Spezifische Regeln müssen VOR allgemeinen stehen
 
-# Python
+# whisper-modell: Ordner tracken, Inhalt ignorieren
+models/whisper-modell/*
+!models/whisper-modell/.gitkeep
+
+# llm: Ordner tracken, Inhalt ignorieren
+models/llm/*
+!models/llm/.gitkeep
+
+# Alle anderen Modell-Ordner komplett ignorieren
+models/whisper 8bit/
+models/whisper-large*/
+models/Qwen*/
+
+# ── Python ───────────────────────────────────────────────────────────────────
 venv/
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
-# Build-Ausgaben
+# ── Build-Ausgaben ────────────────────────────────────────────────────────────
 dist/
 build/
 
-# macOS
+# ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
 *.log

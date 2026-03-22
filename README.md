@@ -56,17 +56,27 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Download a Whisper model
+### 3. Download the Whisper model
 
-The recommended model is `whisper-large-v3-turbo` in 4-bit quantisation — fast and accurate:
+WhisperMac requires a Whisper model in **MLX format** from Hugging Face. The model files go into the `models/whisper-modell/` folder.
+
+The recommended model is `whisper-large-v3-turbo` — fast and accurate on Apple Silicon:
 
 ```bash
 pip install huggingface_hub
 huggingface-cli download mlx-community/whisper-large-v3-turbo \
-    --local-dir models/whisper-large-v3-turbo
+    --local-dir models/whisper-modell
 ```
 
-Other supported sizes: `whisper-large-v3-turbo-4bit`, `whisper-large-v3-turbo-8bit`, `whisper-large-v3`.
+Other good options (all from [mlx-community](https://huggingface.co/mlx-community) on Hugging Face):
+
+| Model | Size | Speed | Accuracy |
+|-------|------|-------|----------|
+| `mlx-community/whisper-large-v3-turbo` | ~3 GB | ★★★★ | ★★★★★ |
+| `mlx-community/whisper-large-v3-turbo-q4` | ~1 GB | ★★★★★ | ★★★★ |
+| `mlx-community/whisper-large-v3` | ~6 GB | ★★★ | ★★★★★ |
+
+> **Important:** The model must be in MLX format (`.safetensors`). Standard PyTorch models will not work.
 
 ### 4. Run
 
@@ -90,15 +100,21 @@ On first launch macOS will ask for:
 
 ## Optional: KI Correction (on-device LLM)
 
-If you want WhisperMac to automatically correct grammar after transcription, download an MLX-compatible LLM and place it in `models/llm/`:
+WhisperMac can pass every transcription through a local LLM to fix grammar, capitalisation and punctuation before inserting the text.
+
+The LLM must also be in **MLX format**. Place the model files in `models/llm/`.
+
+Recommended model (Qwen 3.5 2B, 8-bit):
 
 ```bash
+pip install mlx-lm
 huggingface-cli download NexVeridian/Qwen3.5-2B-8bit \
     --local-dir models/llm
-pip install mlx-lm
 ```
 
-Then enable *KI-Korrektur* in the menu bar icon → **KI-Korrektur**, or double-tap `fn`. The correction prompt is fully editable in the same settings window.
+Any instruction-tuned MLX model works. Browse options on [Hugging Face](https://huggingface.co/models?library=mlx&pipeline_tag=text-generation&sort=trending).
+
+Then enable *KI-Korrektur* in the menu bar → **KI-Korrektur**, or double-tap `fn`. The correction prompt is fully editable in the same settings window.
 
 ---
 

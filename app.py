@@ -73,12 +73,12 @@ from workflows_window import WorkflowsWindowController
 
 # Pfade: funktioniert sowohl als Skript als auch als gebaute .app
 if getattr(sys, "frozen", False):
-    MODEL_PATH      = os.path.expanduser("~/WhisperMac/models/whisper-large-v3-turbo")
+    MODEL_PATH      = os.path.expanduser("~/WhisperMac/models/whisper-modell")
     CORRECTOR_PATH  = os.path.expanduser("~/WhisperMac/models/llm")
     MENUBAR_ICON    = os.path.expanduser("~/WhisperMac/Assets/menubar.png")
 else:
     BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-    MODEL_PATH      = os.path.join(BASE_DIR, "models", "whisper-large-v3-turbo")
+    MODEL_PATH      = os.path.join(BASE_DIR, "models", "whisper-modell")
     CORRECTOR_PATH  = os.path.join(BASE_DIR, "models", "llm")
     MENUBAR_ICON    = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
