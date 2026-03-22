@@ -274,6 +274,10 @@ class WhisperMacApp(rumps.App):
         self._f13_hold_triggered = False
         self._f13_last_was_hold  = False
         self._f15_tap_timer      = None   # Timer für Doppelklick-Erkennung
+        self._fn_press_time         = None   # Zeitpunkt des letzten fn-Drucks
+        self._fn_last_release_time  = None   # Zeitpunkt des letzten fn-Loslassens
+        self._fn_last_hold_duration = 0.0    # Haltedauer des letzten fn-Drucks
+        self._fn_is_double_tap      = False  # Zweiter Tipp eines Doppeltipps
         self._transcribe_lock = threading.Lock()
         self._transcription_seq  = 0   # Jeder fn-Druck erhöht diesen Zähler
         self._shortcuts_win   = ShortcutsWindowController.alloc().init()
@@ -421,7 +425,7 @@ class WhisperMacApp(rumps.App):
                 self.corrector.preload()
             except Exception as e:
                 logging.exception(f"KI-Korrektor konnte nicht geladen werden: {e}")
-        self._set_ui(status="Bereit – fn halten zum Aufnehmen")
+        self._set_ui(status=self._ready_status())
         self._start_fn_listener()
         # Kurz "Bereit" neben dem Icon anzeigen, dann wieder ausblenden
         def _show_ready():
@@ -432,6 +436,10 @@ class WhisperMacApp(rumps.App):
         threading.Timer(3.0, lambda: AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_hide_ready)).start()
 
     # ── UI-Update (thread-safe) ───────────────────────────────────────────
+
+    def _ready_status(self) -> str:
+        ki = "KI: aktiv" if self._ki_korrektur else "KI: aus"
+        return f"Bereit – fn halten zum Aufnehmen  |  {ki}  (2× fn zum Umschalten)"
 
     def _set_ui(self, status=None):
         def _update():
@@ -557,16 +565,33 @@ class WhisperMacApp(rumps.App):
             snd.play()
 
     def _on_fn_press(self):
+        now = time.time()
+        # Doppeltipp: zweite schnelle Berührung kurz nach einer kurzen Berührung
+        if (self._fn_last_release_time is not None
+                and now - self._fn_last_release_time < 0.35
+                and self._fn_last_hold_duration < 0.25):
+            self._fn_is_double_tap = True
+            self._fn_press_time = now
+            self._toggle_ki_mode()
+            return
+        self._fn_is_double_tap = False
+        self._fn_press_time = now
         if self._is_recording:
             return
         self._is_recording = True
-        self._transcription_seq += 1   # laufende Transkription invalidieren
+        self._transcription_seq += 1
         self._play_start_sound()
         self._status_item.title = "Aufnahme läuft…"
         self.recorder.start()
         self.overlay.show(lambda: self.recorder.current_level)
 
     def _on_fn_release(self):
+        now = time.time()
+        self._fn_last_hold_duration = (now - self._fn_press_time) if self._fn_press_time else 0.0
+        self._fn_last_release_time  = now
+        if self._fn_is_double_tap:
+            self._fn_is_double_tap = False
+            return
         if not self._is_recording:
             return
         self.overlay.hide()
@@ -581,7 +606,7 @@ class WhisperMacApp(rumps.App):
 
         if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.3):
             self._spinner.hide()
-            self._set_ui(status="Bereit – fn halten zum Aufnehmen")
+            self._set_ui(status=self._ready_status())
             return
 
         # Auf vorherige Transkription warten (blockend statt überspringen)
@@ -593,6 +618,13 @@ class WhisperMacApp(rumps.App):
             if self._is_silence(audio):
                 return
             text = self.transcriber.transcribe(audio, language=self.language)
+            # Whisper-Quirk: manchmal alles kleingeschrieben → bis zu 3× wiederholen
+            for _retry in range(2):
+                if not (text and text == text.lower() and len(text.split()) >= 2):
+                    break
+                logging.info(f"Whisper: alles klein – Versuch {_retry + 2}/3")
+                self._set_ui(status=f"Wiederhole… ({_retry + 2}/3)")
+                text = self.transcriber.transcribe(audio, language=self.language)
             try:
                 import mlx.core as mx
                 mx.metal.clear_cache()
@@ -617,7 +649,7 @@ class WhisperMacApp(rumps.App):
         finally:
             self._spinner.hide()
             self._transcribe_lock.release()
-            self._set_ui(status="Bereit – fn halten zum Aufnehmen")
+            self._set_ui(status=self._ready_status())
 
     # ── Text einfügen (mit Workflow-Unterstützung) ────────────────────────
 
@@ -1013,6 +1045,29 @@ end tell"""])
                 self._save_settings()
                 break
 
+    def _toggle_ki_mode(self):
+        """KI-Modus per Doppeltipp an/ausschalten."""
+        self._ki_korrektur = not self._ki_korrektur
+        enabled = self._ki_korrektur
+        msg = "KI-Modus aktiviert" if enabled else "KI-Modus deaktiviert"
+
+        def _update():
+            self._ki_item._menuitem.setState_(1 if enabled else 0)
+            self._status_item.title = msg
+            self.title = f" {msg}"
+
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_update)
+
+        self._save_settings()
+        if enabled and self.corrector._model is None:
+            threading.Thread(target=self._load_corrector_bg, daemon=True).start()
+
+        # Meldung nach 2 Sekunden wieder ausblenden
+        def _reset():
+            self._status_item.title = self._ready_status()
+            self.title = ""
+        threading.Timer(2.0, lambda: AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_reset)).start()
+
     def _on_ki_toggle(self, sender):
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._ki_win.show)
 
@@ -1031,7 +1086,7 @@ end tell"""])
             self.corrector.preload()
         except Exception as e:
             logging.exception(f"KI-Korrektor konnte nicht geladen werden: {e}")
-        self._set_ui(status="Bereit – fn halten zum Aufnehmen")
+        self._set_ui(status=self._ready_status())
 
 
 if __name__ == "__main__":
