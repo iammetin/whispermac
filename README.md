@@ -41,14 +41,33 @@ WhisperMac lives in your menu bar and lets you dictate into any app, at any time
 
 ## Installation
 
-### 1. Clone the repository
+### Quick setup (recommended)
+
+```bash
+git clone https://github.com/your-username/WhisperMac.git
+cd WhisperMac
+chmod +x setup.sh && ./setup.sh
+```
+
+The setup script will:
+- Check all requirements (macOS, Apple Silicon, Python 3.11, Homebrew)
+- Create a virtual environment and install all dependencies
+- Check whether your models are in place and show download instructions if not
+- Build the `.app` and install it to `/Applications`
+- Add WhisperMac to your Dock automatically
+
+---
+
+### Manual setup
+
+#### 1. Clone the repository
 
 ```bash
 git clone https://github.com/your-username/WhisperMac.git
 cd WhisperMac
 ```
 
-### 2. Create a virtual environment and install dependencies
+#### 2. Create a virtual environment and install dependencies
 
 ```bash
 python3.11 -m venv venv
@@ -56,7 +75,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Download the Whisper model
+#### 3. Download the Whisper model
 
 WhisperMac requires a Whisper model in **MLX format** from Hugging Face. The model files go into the `models/whisper-modell/` folder.
 
@@ -78,16 +97,16 @@ Other good options (all from [mlx-community](https://huggingface.co/mlx-communit
 
 > **Important:** The model must be in MLX format (`.safetensors`). Standard PyTorch models will not work.
 
-### 4. Run
+#### 4. Build and run
+
+```bash
+./build.sh   # builds the .app, installs to /Applications and launches it
+```
+
+For development without building:
 
 ```bash
 ./start.sh
-```
-
-Or build a standalone `.app` for `/Applications`:
-
-```bash
-./build.sh
 ```
 
 ### 5. Grant permissions
