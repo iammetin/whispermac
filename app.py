@@ -57,7 +57,7 @@ from Quartz import (
 kCGDirectMainDisplay = 0
 
 F13_KEYCODE = 105
-F14_KEYCODE = 179
+F14_KEYCODE = 107
 F15_KEYCODE = 113
 
 from overlay import RecordingOverlay
@@ -479,7 +479,7 @@ class WhisperMacApp(rumps.App):
                             self._f13_hold_timer.start()
                         return None
                     if kc == F14_KEYCODE:
-                        self._undo()
+                        threading.Thread(target=self._on_f14_ai_edit, daemon=True).start()
                         return None
                     if kc == F15_KEYCODE:
                         def _handle_f15():
@@ -910,6 +910,58 @@ end tell"""])
         up = CGEventCreateKeyboardEvent(None, KEY_Z, False)
         CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, up)
+
+    def _on_f14_ai_edit(self):
+        """Markierten Text per F14 an das KI-Modell schicken und ersetzen.
+        Unabhängig vom KI-Korrektur-Toggle – aktiviert diesen NICHT."""
+        logging.info("F14 AI-Edit gestartet")
+        self._spinner.show()
+        self._set_ui(status="KI verarbeitet…")
+        try:
+            # Kurz warten damit Event-Tap fertig ist, dann Cmd+C
+            time.sleep(0.15)
+            subprocess.run([
+                "osascript", "-e",
+                'tell application "System Events" to keystroke "c" using command down',
+            ])
+            time.sleep(0.25)  # Clipboard braucht kurz
+
+            pb = AppKit.NSPasteboard.generalPasteboard()
+            selected = (pb.stringForType_(AppKit.NSPasteboardTypeString) or "").strip()
+            logging.info(f"F14: Clipboard='{selected[:80]}'")
+
+            if not selected:
+                logging.info("F14: Kein Text im Clipboard")
+                def _notify():
+                    self.title = " Kein Text ausgewählt"
+                AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_notify)
+                threading.Timer(2.0, lambda: AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                    lambda: setattr(self, "title", "")
+                )).start()
+                return
+
+            # Modell laden falls noch nicht geschehen (bleibt geladen)
+            if self.corrector._model is None:
+                self._set_ui(status="Lade KI-Modell…")
+                self.corrector.preload()
+
+            self._set_ui(status="KI verarbeitet…")
+            result = self.corrector.correct(selected)
+            logging.info(f"F14: Ergebnis='{result[:80]}'")
+
+            if result and result != selected:
+                pb.clearContents()
+                pb.setString_forType_(result, AppKit.NSPasteboardTypeString)
+                time.sleep(0.05)
+                subprocess.run([
+                    "osascript", "-e",
+                    'tell application "System Events" to keystroke "v" using command down',
+                ])
+        except Exception as e:
+            logging.exception(f"F14 AI-Edit Fehler: {e}")
+        finally:
+            self._spinner.hide()
+            self._set_ui(status=self._ready_status())
 
     # ── Kürzel & Workflows ────────────────────────────────────────────────
 
