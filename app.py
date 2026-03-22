@@ -492,6 +492,9 @@ class WhisperMacApp(rumps.App):
                             if not self._is_recording:
                                 self.recorder.start()
                                 self.overlay.show(lambda: self.recorder.current_level)
+                            # Modell schon jetzt laden falls nötig – parallel zur Aufnahme
+                            if self.corrector._model is None:
+                                threading.Thread(target=self._load_corrector_bg, daemon=True).start()
                         return None
                     if kc == F15_KEYCODE:
                         def _handle_f15():

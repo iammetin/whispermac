@@ -5,6 +5,13 @@ Grammatikalische Korrektur des transkribierten Textes per lokalem Qwen-Modell.
 import logging
 import re
 
+_GLOBAL_PREFIX = (
+    "Führe die folgende Anweisung mit dem gegebenen Text aus. "
+    "Antworte ausschließlich mit dem Ergebnis – ohne Einleitung, Erklärung, Kommentar oder Begründung. "
+    "Verwende keine Formatierung: kein Markdown, keine Sternchen, kein HTML, keine Aufzählungszeichen. "
+    "Gib den Text als reinen Fließtext aus, genau so formatiert wie der Eingabetext."
+)
+
 _SYSTEM_PROMPT = (
     "Du bist ein Grammatik-Korrekturdienst für Spracherkennung. "
     "Korrigiere den deutschen Text grammatikalisch (Groß-/Kleinschreibung, "
@@ -32,7 +39,8 @@ class TextCorrector:
             return text
         try:
             from mlx_lm import generate
-            effective_prompt = system_prompt if system_prompt is not None else self.system_prompt
+            individual = system_prompt if system_prompt is not None else self.system_prompt
+            effective_prompt = f"{_GLOBAL_PREFIX}\n\n{individual}"
             messages = [
                 {"role": "system", "content": effective_prompt},
                 {"role": "user",   "content": text},
@@ -47,7 +55,7 @@ class TextCorrector:
             result = generate(
                 self._model, self._tokenizer,
                 prompt=prompt,
-                max_tokens=512,
+                max_tokens=16000,
                 verbose=False,
             )
             # Qwen3 Denk-Tokens entfernen (<think>…</think>)
