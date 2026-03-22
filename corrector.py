@@ -6,10 +6,8 @@ import logging
 import re
 
 _GLOBAL_PREFIX = (
-    "Führe die folgende Anweisung mit dem gegebenen Text aus. "
     "Antworte ausschließlich mit dem Ergebnis – ohne Einleitung, Erklärung, Kommentar oder Begründung. "
-    "Verwende keine Formatierung: kein Markdown, keine Sternchen, kein HTML, keine Aufzählungszeichen. "
-    "Gib den Text als reinen Fließtext aus, genau so formatiert wie der Eingabetext."
+    "Kein Markdown, keine Sternchen, keine Aufzählungszeichen."
 )
 
 _SYSTEM_PROMPT = (
@@ -39,26 +37,37 @@ class TextCorrector:
             return text
         try:
             from mlx_lm import generate
+            from mlx_lm.sample_utils import make_sampler, make_logits_processors
             individual = system_prompt if system_prompt is not None else self.system_prompt
-            effective_prompt = f"{_GLOBAL_PREFIX}\n\n{individual}"
+            # System: nur Ausgabe-Verhalten (kurz, kein "Gib den Text aus")
+            # User: Anweisung + Text zusammen → Modell versteht Aufgabe korrekt
             messages = [
-                {"role": "system", "content": effective_prompt},
-                {"role": "user",   "content": text},
+                {"role": "system", "content": _GLOBAL_PREFIX},
+                {"role": "user",   "content": f"{individual}\n\n{text}"},
             ]
             if getattr(self._tokenizer, "chat_template", None):
-                prompt = self._tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
+                try:
+                    prompt = self._tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                except TypeError:
+                    prompt = self._tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True,
+                    )
             else:
-                prompt = f"{_SYSTEM_PROMPT}\n\n{text}"
+                prompt = f"{individual}\n\n{text}"
 
+            sampler = make_sampler(temp=1.0, top_p=1.0, top_k=20, min_p=0.0)
+            logits_processors = make_logits_processors(presence_penalty=2.0)
             result = generate(
                 self._model, self._tokenizer,
                 prompt=prompt,
                 max_tokens=16000,
                 verbose=False,
+                sampler=sampler,
+                logits_processors=logits_processors,
             )
-            # Qwen3 Denk-Tokens entfernen (<think>…</think>)
             result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
             logging.debug(f"Korrektor: '{text}' → '{result}'")
             return result if result else text
