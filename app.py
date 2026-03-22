@@ -66,7 +66,7 @@ from recorder import AudioRecorder
 from shortcuts import apply_shortcuts, load_shortcuts
 from shortcuts_window import ShortcutsWindowController
 from corrector import TextCorrector
-from ki_window import KIWindowController, load_ki_settings
+from ki_window import PromptManagerWindowController, load_ki_settings
 from transcriber import Transcriber
 from workflows import execute_action, load_workflows, paste_html, split_by_triggers
 from workflows_window import WorkflowsWindowController
@@ -262,8 +262,9 @@ class WhisperMacApp(rumps.App):
         self._fn_pressed      = False
         self.language         = self._load_setting("language", None, {c for c,_ in LANG_OPTIONS})
         self._translate_to    = self._load_setting("translate_to", None, {c for c,_ in TRANSLATE_OPTIONS})
-        self._ki_korrektur, ki_prompt = load_ki_settings()
-        self.corrector.system_prompt  = ki_prompt
+        self._ki_korrektur, ki_live_prompt, ki_auswahl_prompt = load_ki_settings()
+        self.corrector.system_prompt = ki_live_prompt
+        self._ki_auswahl_prompt      = ki_auswahl_prompt
         self._mic_device_name = self._load_raw_setting("mic_device", None)
         self._mic_device_idx  = None  # wird beim Menü-Aufbau aufgelöst
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
@@ -280,10 +281,12 @@ class WhisperMacApp(rumps.App):
         self._fn_is_double_tap      = False  # Zweiter Tipp eines Doppeltipps
         self._transcribe_lock = threading.Lock()
         self._transcription_seq  = 0   # Jeder fn-Druck erhöht diesen Zähler
-        self._shortcuts_win   = ShortcutsWindowController.alloc().init()
-        self._workflows_win   = WorkflowsWindowController.alloc().init()
-        self._ki_win          = KIWindowController.alloc().init()
-        self._ki_win._on_save = self._on_ki_saved
+        self._shortcuts_win    = ShortcutsWindowController.alloc().init()
+        self._workflows_win    = WorkflowsWindowController.alloc().init()
+        self._ki_live_win      = PromptManagerWindowController.alloc().initWithMode_("live")
+        self._ki_live_win._on_save    = self._on_ki_live_saved
+        self._ki_auswahl_win   = PromptManagerWindowController.alloc().initWithMode_("auswahl")
+        self._ki_auswahl_win._on_save = self._on_ki_auswahl_saved
 
         # ── Status-Zeile ──────────────────────────────────────────────────
         self._status_item = rumps.MenuItem("Lade Modell…")
@@ -327,14 +330,16 @@ class WhisperMacApp(rumps.App):
             if name == self._mic_device_name:
                 self._mic_device_idx = idx
 
-        # ── KI-Korrektur-Toggle ───────────────────────────────────────────
-        self._ki_item = rumps.MenuItem("KI-Korrektur", callback=self._on_ki_toggle)
+        # ── KI-Menü-Einträge ──────────────────────────────────────────────
+        self._ki_item         = rumps.MenuItem("KI-Live-Korrektur",    callback=self._on_ki_live_toggle)
+        self._ki_auswahl_item = rumps.MenuItem("KI-Auswahl-Korrektur", callback=self._on_ki_auswahl_toggle)
 
         # ── Menü zusammenbauen ────────────────────────────────────────────
         menu = [self._status_item, None, self._hist_header]
         menu.extend(self._history_items)
         menu.extend([None, self._mic_submenu, self._lang_submenu, self._translate_submenu,
                      self._ki_item,
+                     self._ki_auswahl_item,
                      rumps.MenuItem("Kürzel…  (F15)",         callback=self._on_shortcuts),
                      rumps.MenuItem("Workflows…  (F15 F15)", callback=self._on_workflows),
                      None,
@@ -484,10 +489,12 @@ class WhisperMacApp(rumps.App):
                     if kc == F15_KEYCODE:
                         def _handle_f15():
                             # Alles auf dem Main Thread – AppKit-Zugriffe nur hier
-                            if self._shortcuts_win.is_open() or self._workflows_win.is_open() or self._ki_win.is_open():
+                            if (self._shortcuts_win.is_open() or self._workflows_win.is_open()
+                                    or self._ki_live_win.is_open() or self._ki_auswahl_win.is_open()):
                                 self._shortcuts_win.close()
                                 self._workflows_win.close()
-                                self._ki_win.close()
+                                self._ki_live_win.close()
+                                self._ki_auswahl_win.close()
                                 return
                             if self._f15_tap_timer is not None:
                                 # Zweiter Klick innerhalb 350ms → Workflows öffnen
@@ -946,7 +953,7 @@ end tell"""])
                 self.corrector.preload()
 
             self._set_ui(status="KI verarbeitet…")
-            result = self.corrector.correct(selected)
+            result = self.corrector.correct(selected, system_prompt=self._ki_auswahl_prompt)
             logging.info(f"F14: Ergebnis='{result[:80]}'")
 
             if result and result != selected:
@@ -1120,16 +1127,25 @@ end tell"""])
             self.title = ""
         threading.Timer(2.0, lambda: AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_reset)).start()
 
-    def _on_ki_toggle(self, sender):
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._ki_win.show)
+    def _on_ki_live_toggle(self, sender):
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._ki_live_win.show)
 
-    def _on_ki_saved(self, enabled: bool, prompt: str):
-        """Callback vom KI-Fenster nach 'Speichern'."""
+    def _on_ki_auswahl_toggle(self, sender):
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._ki_auswahl_win.show)
+
+    def _on_ki_live_saved(self, enabled: bool, prompt: str):
+        """Callback vom KI-Live-Fenster."""
         self._ki_korrektur = enabled
         self.corrector.system_prompt = prompt
         self._ki_item._menuitem.setState_(1 if enabled else 0)
-        # Modell laden falls zum ersten Mal aktiviert
         if enabled and self.corrector._model is None:
+            threading.Thread(target=self._load_corrector_bg, daemon=True).start()
+
+    def _on_ki_auswahl_saved(self, prompt: str):
+        """Callback vom KI-Auswahl-Fenster."""
+        self._ki_auswahl_prompt = prompt
+        # Modell laden falls noch nicht geschehen (F14 könnte gleich genutzt werden)
+        if self.corrector._model is None:
             threading.Thread(target=self._load_corrector_bg, daemon=True).start()
 
     def _load_corrector_bg(self):

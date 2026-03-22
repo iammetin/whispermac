@@ -27,13 +27,14 @@ class TextCorrector:
         self._model, self._tokenizer = load(self.model_path)
         logging.info("Korrektor-Modell geladen.")
 
-    def correct(self, text: str) -> str:
+    def correct(self, text: str, system_prompt: str = None) -> str:
         if self._model is None or self._tokenizer is None:
             return text
         try:
             from mlx_lm import generate
+            effective_prompt = system_prompt if system_prompt is not None else self.system_prompt
             messages = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": effective_prompt},
                 {"role": "user",   "content": text},
             ]
             if getattr(self._tokenizer, "chat_template", None):
