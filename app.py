@@ -274,7 +274,9 @@ class WhisperMacApp(rumps.App):
         self._f13_hold_timer     = None
         self._f13_hold_triggered = False
         self._f13_last_was_hold  = False
-        self._f15_tap_timer      = None   # Timer für Doppelklick-Erkennung
+        self._f14_is_down    = False
+        self._f14_press_time = 0.0
+        self._f15_tap_timer  = None   # Timer für Doppelklick-Erkennung
         self._fn_press_time         = None   # Zeitpunkt des letzten fn-Drucks
         self._fn_last_release_time  = None   # Zeitpunkt des letzten fn-Loslassens
         self._fn_last_hold_duration = 0.0    # Haltedauer des letzten fn-Drucks
@@ -484,7 +486,12 @@ class WhisperMacApp(rumps.App):
                             self._f13_hold_timer.start()
                         return None
                     if kc == F14_KEYCODE:
-                        threading.Thread(target=self._on_f14_ai_edit, daemon=True).start()
+                        if not self._f14_is_down:
+                            self._f14_is_down    = True
+                            self._f14_press_time = time.time()
+                            if not self._is_recording:
+                                self.recorder.start()
+                                self.overlay.show(lambda: self.recorder.current_level)
                         return None
                     if kc == F15_KEYCODE:
                         def _handle_f15():
@@ -514,6 +521,19 @@ class WhisperMacApp(rumps.App):
                         return None
                 elif event_type == kCGEventKeyUp:
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+                    if kc == F14_KEYCODE:
+                        self._f14_is_down = False
+                        self.overlay.hide()
+                        hold_dur = time.time() - self._f14_press_time
+                        if hold_dur >= 0.35 and not self._is_recording:
+                            # Hold: Audio als Prompt verwenden
+                            self._spinner.show()
+                            threading.Thread(target=self._on_f14_hold_release, daemon=True).start()
+                        else:
+                            # Tap: Aufnahme wegwerfen, Standard-Prompt
+                            self.recorder.stop()
+                            threading.Thread(target=self._on_f14_ai_edit, daemon=True).start()
+                        return None
                     if kc == F13_KEYCODE:
                         self._f13_is_down = False
                         if self._f13_hold_timer:
@@ -917,6 +937,61 @@ end tell"""])
         up = CGEventCreateKeyboardEvent(None, KEY_Z, False)
         CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, up)
+
+    def _on_f14_hold_release(self):
+        """F14 nach Halten losgelassen: Audio transkribieren → als Prompt → LLM → einfügen."""
+        try:
+            self._set_ui(status="Transkribiere Prompt…")
+            audio = self.recorder.stop()
+
+            if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.3):
+                self._set_ui(status="Zu kurz gesprochen")
+                threading.Timer(1.5, lambda: self._set_ui(status=self._ready_status())).start()
+                return
+
+            custom_prompt = self.transcriber.transcribe(audio, language=self.language)
+            logging.info(f"F14 Hold Prompt: '{custom_prompt}'")
+            if not custom_prompt:
+                self._set_ui(status="Kein Text erkannt")
+                threading.Timer(1.5, lambda: self._set_ui(status=self._ready_status())).start()
+                return
+
+            # Ausgewählten Text holen
+            time.sleep(0.1)
+            subprocess.run([
+                "osascript", "-e",
+                'tell application "System Events" to keystroke "c" using command down',
+            ])
+            time.sleep(0.2)
+            pb = AppKit.NSPasteboard.generalPasteboard()
+            selected = (pb.stringForType_(AppKit.NSPasteboardTypeString) or "").strip()
+            logging.info(f"F14 Hold Selected: '{selected[:80]}'")
+            if not selected:
+                self._set_ui(status="Kein Text ausgewählt")
+                threading.Timer(2.0, lambda: self._set_ui(status=self._ready_status())).start()
+                return
+
+            if self.corrector._model is None:
+                self._set_ui(status="Lade KI-Modell…")
+                self.corrector.preload()
+
+            self._set_ui(status="KI verarbeitet…")
+            result = self.corrector.correct(selected, system_prompt=custom_prompt)
+            logging.info(f"F14 Hold Ergebnis: '{result[:80]}'")
+
+            if result and result != selected:
+                pb.clearContents()
+                pb.setString_forType_(result, AppKit.NSPasteboardTypeString)
+                time.sleep(0.05)
+                subprocess.run([
+                    "osascript", "-e",
+                    'tell application "System Events" to keystroke "v" using command down',
+                ])
+        except Exception as e:
+            logging.exception(f"F14 Hold Fehler: {e}")
+        finally:
+            self._spinner.hide()
+            self._set_ui(status=self._ready_status())
 
     def _on_f14_ai_edit(self):
         """Markierten Text per F14 an das KI-Modell schicken und ersetzen.
