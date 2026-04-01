@@ -539,9 +539,9 @@ class WhisperMacApp(rumps.App):
 
     _LIVE_TRANSCRIBE_INTERVAL = 0.18
     _LIVE_MIN_AUDIO_SECONDS   = 0.25
-    _LIVE_FLUSH_GUARD_WORDS   = 0
+    _LIVE_FLUSH_GUARD_WORDS   = 1
     _LIVE_MIN_FLUSH_WORDS     = 1
-    _LIVE_FIRST_PASS_GUARD_WORDS = 0
+    _LIVE_FIRST_PASS_GUARD_WORDS = 1
     _LIVE_LLM_MIN_WORDS       = 8
 
     def _clear_mlx_cache(self):
@@ -566,10 +566,9 @@ class WhisperMacApp(rumps.App):
         return count
 
     def _basic_live_cleanup(self, text: str) -> str:
-        text = re.sub(r"\b(?:äh+|ähm+|hm+|hmm+|mmm+)\b", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)
         text = re.sub(r"\s{2,}", " ", text)
-        return text.strip(" \t\r\n,")
+        return text.strip()
 
     def _transcribe_audio(self, audio, retry_lowercase: bool = True, live_pass: bool = False) -> str:
         text = self.transcriber.transcribe(audio, language=self.language)
@@ -666,14 +665,20 @@ class WhisperMacApp(rumps.App):
                         return
                     state["passes"] += 1
                     passes = state["passes"]
-                    known_len = len(state["committed_words"]) + len(state["pending_words"])
+                    committed_len = len(state["committed_words"])
                     if state["prev_words"]:
                         stable_len = self._common_prefix_len(state["prev_words"], words)
                     else:
-                        first_guard = self._LIVE_FIRST_PASS_GUARD_WORDS if len(words) >= 3 else 0
-                        stable_len = max(0, len(words) - first_guard)
-                    if stable_len > known_len:
-                        state["pending_words"].extend(words[known_len:stable_len])
+                        stable_len = max(0, len(words) - self._LIVE_FIRST_PASS_GUARD_WORDS)
+                    if stable_len < committed_len:
+                        logging.debug(
+                            "Live-Stabilitaet hinter committed_words: committed=%s stable=%s words=%s",
+                            committed_len,
+                            stable_len,
+                            words,
+                        )
+                        stable_len = committed_len
+                    state["pending_words"] = words[committed_len:stable_len]
                     state["prev_words"] = words
                 self._flush_live_pending(seq, final=False)
             except Exception as e:
@@ -693,7 +698,7 @@ class WhisperMacApp(rumps.App):
             if final:
                 flush_count = len(pending)
             elif passes <= 1:
-                flush_count = len(pending)
+                return
             else:
                 flush_count = len(pending) - self._LIVE_FLUSH_GUARD_WORDS
                 if flush_count < self._LIVE_MIN_FLUSH_WORDS:

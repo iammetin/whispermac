@@ -1,3 +1,4 @@
+from collections import deque
 import threading
 import numpy as np
 import sounddevice as sd
@@ -5,6 +6,8 @@ import sounddevice as sd
 
 class AudioRecorder:
     SAMPLE_RATE = 16000
+    PRE_ROLL_SECONDS = 0.35
+    BLOCK_DURATION_SECONDS = 0.02
 
     def __init__(self):
         self.frames     = []
@@ -12,6 +15,9 @@ class AudioRecorder:
         self._recording = False
         self._stream    = None
         self._device    = None
+        self._pre_roll = deque()
+        self._pre_roll_samples = 0
+        self._pre_roll_max_samples = int(self.SAMPLE_RATE * self.PRE_ROLL_SECONDS)
 
     def warmup(self, device=None):
         """Stream dauerhaft öffnen – start()/stop() setzen nur ein Flag, kein Overhead."""
@@ -27,6 +33,8 @@ class AudioRecorder:
             channels=1,
             dtype="float32",
             device=self._device,
+            latency="low",
+            blocksize=int(self.SAMPLE_RATE * self.BLOCK_DURATION_SECONDS),
             callback=self._callback,
         )
         self._stream.start()
@@ -37,15 +45,21 @@ class AudioRecorder:
         self._open_stream()
 
     def start(self):
-        """Aufnahme starten – nur Flag setzen, stream läuft bereits."""
+        """Aufnahme starten – laufenden Pre-Roll voranstellen, stream läuft bereits."""
         with self._lock:
-            self.frames = []
+            self.frames = [chunk.copy() for chunk in self._pre_roll]
             self._recording = True
 
     def _callback(self, indata, frames, time, status):
-        if self._recording:
-            with self._lock:
-                self.frames.append(indata.copy())
+        chunk = indata.copy()
+        with self._lock:
+            self._pre_roll.append(chunk)
+            self._pre_roll_samples += len(chunk)
+            while self._pre_roll and self._pre_roll_samples > self._pre_roll_max_samples:
+                dropped = self._pre_roll.popleft()
+                self._pre_roll_samples -= len(dropped)
+            if self._recording:
+                self.frames.append(chunk)
 
     def stop(self) -> np.ndarray | None:
         """Aufnahme stoppen und aufgezeichnete Audio-Daten zurückgeben."""
