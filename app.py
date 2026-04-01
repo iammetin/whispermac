@@ -45,6 +45,7 @@ from Quartz import (
     kCGEventFlagsChanged,
     kCGEventFlagMaskAlternate,
     kCGEventFlagMaskCommand,
+    kCGEventFlagMaskControl,
     kCGEventFlagMaskSecondaryFn,
     kCGEventKeyDown,
     kCGEventKeyUp,
@@ -588,6 +589,31 @@ class WhisperMacApp(rumps.App):
     _LIVE_MUTABLE_TAIL_WORDS  = 4
     _LIVE_PAUSE_FINALIZE_SECONDS = 0.35
     _LIVE_LLM_MIN_WORDS       = 8
+    _TERMINAL_BUNDLE_IDS = {
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.github.wez.wezterm",
+        "com.microsoft.VSCode",
+        "com.microsoft.VSCodeInsiders",
+        "org.alacritty",
+        "co.zeit.hyper",
+        "net.kovidgoyal.kitty",
+        "dev.warp.Warp",
+        "dev.warp.Warp-Stable",
+        "dev.warp.Warp-Beta",
+        "dev.warp.Warp-Preview",
+        "com.mitchellh.ghostty",
+    }
+    _TERMINAL_NAME_SNIPPETS = (
+        "terminal",
+        "iterm",
+        "wezterm",
+        "alacritty",
+        "hyper",
+        "kitty",
+        "warp",
+        "ghostty",
+    )
 
     def _clear_mlx_cache(self):
         try:
@@ -772,8 +798,62 @@ class WhisperMacApp(rumps.App):
             count += 1
         return left[:count]
 
+    def _frontmost_app_identity(self) -> tuple[str, str]:
+        try:
+            app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            if app is None:
+                return "", ""
+            return str(app.bundleIdentifier() or ""), str(app.localizedName() or "")
+        except Exception as e:
+            logging.debug(f"_frontmost_app_identity exception: {e}")
+            return "", ""
+
+    def _is_terminal_target(self) -> bool:
+        bundle_id, name = self._frontmost_app_identity()
+        bundle_id_lc = bundle_id.lower()
+        name_lc = name.lower()
+        is_terminal = (
+            bundle_id in self._TERMINAL_BUNDLE_IDS
+            or any(token in bundle_id_lc for token in self._TERMINAL_NAME_SNIPPETS)
+            or any(token in name_lc for token in self._TERMINAL_NAME_SNIPPETS)
+        )
+        logging.debug(
+            "Frontmost app: bundle=%s name=%s terminal=%s",
+            bundle_id or "-",
+            name or "-",
+            is_terminal,
+        )
+        return is_terminal
+
+    def _post_key(self, keycode: int, flags: int = 0):
+        down = CGEventCreateKeyboardEvent(None, keycode, True)
+        if flags:
+            CGEventSetFlags(down, flags)
+        CGEventPost(kCGHIDEventTap, down)
+        up = CGEventCreateKeyboardEvent(None, keycode, False)
+        if flags:
+            CGEventSetFlags(up, flags)
+        CGEventPost(kCGHIDEventTap, up)
+
+    def _replace_recent_text_terminal(self, old_tail_len: int, new_tail: str) -> bool:
+        if old_tail_len > 0:
+            for _ in range(old_tail_len):
+                self._post_key(123)  # Pfeil links
+                time.sleep(0.003)
+            self._post_key(40, kCGEventFlagMaskControl)  # Ctrl+K: bis Zeilenende löschen
+            time.sleep(0.01)
+
+        if not new_tail:
+            return True
+
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        return self._paste_plain_text(new_tail, pb)
+
     def _replace_recent_text(self, old_text: str, new_text: str) -> bool:
         old_len = self._ax_text_length(old_text)
+        if self._is_terminal_target():
+            return self._replace_recent_text_terminal(old_len, new_text)
+
         if old_len <= 0:
             if not new_text:
                 return True
