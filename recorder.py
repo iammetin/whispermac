@@ -55,6 +55,14 @@ class AudioRecorder:
                 return np.concatenate(self.frames, axis=0).flatten()
         return None
 
+    def snapshot(self) -> np.ndarray | None:
+        """Liefert einen Snapshot der laufenden Aufnahme, ohne sie zu stoppen."""
+        with self._lock:
+            if not self.frames:
+                return None
+            chunks = [frame.copy() for frame in self.frames]
+        return np.concatenate(chunks, axis=0).flatten()
+
     @property
     def current_level(self) -> float:
         """RMS-Pegel (0.0–1.0) für Wellenform-Animation."""

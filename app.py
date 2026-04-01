@@ -4,6 +4,7 @@ fn-Taste halten → aufnehmen → loslassen → Text wird eingefügt
 """
 import json
 import os
+import re
 import subprocess
 import sounddevice as sd
 from deep_translator import GoogleTranslator
@@ -73,14 +74,16 @@ from workflows_window import WorkflowsWindowController
 
 # Pfade: funktioniert sowohl als Skript als auch als gebaute .app
 if getattr(sys, "frozen", False):
-    MODEL_PATH      = os.path.expanduser("~/WhisperMac/models/whisper-modell")
-    CORRECTOR_PATH  = os.path.expanduser("~/WhisperMac/models/llm")
-    MENUBAR_ICON    = os.path.expanduser("~/WhisperMac/Assets/menubar.png")
+    MODEL_PATH         = os.path.expanduser("~/WhisperMac/models/whisper-cpp/ggml-large-v3-turbo.bin")
+    WHISPER_SERVER_BIN = os.path.expanduser("~/WhisperMac/vendor/whisper.cpp-runtime/build/bin/whisper-server")
+    CORRECTOR_PATH     = os.path.expanduser("~/WhisperMac/models/llm")
+    MENUBAR_ICON       = os.path.expanduser("~/WhisperMac/Assets/menubar.png")
 else:
-    BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-    MODEL_PATH      = os.path.join(BASE_DIR, "models", "whisper-modell")
-    CORRECTOR_PATH  = os.path.join(BASE_DIR, "models", "llm")
-    MENUBAR_ICON    = os.path.join(BASE_DIR, "Assets", "menubar.png")
+    BASE_DIR           = os.path.dirname(os.path.abspath(__file__))
+    MODEL_PATH         = os.path.join(BASE_DIR, "models", "whisper-cpp", "ggml-large-v3-turbo.bin")
+    WHISPER_SERVER_BIN = os.path.join(BASE_DIR, "vendor", "whisper.cpp-runtime", "build", "bin", "whisper-server")
+    CORRECTOR_PATH     = os.path.join(BASE_DIR, "models", "llm")
+    MENUBAR_ICON       = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
 SETTINGS_FILE = os.path.expanduser("~/.whispermac_settings.json")
 FN_FLAG      = kCGEventFlagMaskSecondaryFn   # 0x800000
@@ -253,7 +256,7 @@ class WhisperMacApp(rumps.App):
         self._setup_edit_menu()
 
         self.recorder    = AudioRecorder()
-        self.transcriber = Transcriber(MODEL_PATH)
+        self.transcriber = Transcriber(MODEL_PATH, WHISPER_SERVER_BIN, use_gpu=True)
         self.corrector   = TextCorrector(CORRECTOR_PATH)
         self.overlay     = RecordingOverlay()
         self._spinner    = _TranscriptionSpinner()
@@ -262,6 +265,7 @@ class WhisperMacApp(rumps.App):
         self._fn_pressed      = False
         self.language         = self._load_setting("language", None, {c for c,_ in LANG_OPTIONS})
         self._translate_to    = self._load_setting("translate_to", None, {c for c,_ in TRANSLATE_OPTIONS})
+        self._live_transcription = bool(self._load_raw_setting("live_transcription", True))
         self._ki_korrektur, ki_live_prompt, ki_auswahl_prompt = load_ki_settings()
         self.corrector.system_prompt = ki_live_prompt
         self._ki_auswahl_prompt      = ki_auswahl_prompt
@@ -283,6 +287,8 @@ class WhisperMacApp(rumps.App):
         self._fn_is_double_tap      = False  # Zweiter Tipp eines Doppeltipps
         self._transcribe_lock = threading.Lock()
         self._transcription_seq  = 0   # Jeder fn-Druck erhöht diesen Zähler
+        self._live_state_lock = threading.Lock()
+        self._live_session    = None
         self._shortcuts_win    = ShortcutsWindowController.alloc().init()
         self._workflows_win    = WorkflowsWindowController.alloc().init()
         self._ki_live_win      = PromptManagerWindowController.alloc().initWithMode_("live")
@@ -291,7 +297,7 @@ class WhisperMacApp(rumps.App):
         self._ki_auswahl_win._on_save = self._on_ki_auswahl_saved
 
         # ── Status-Zeile ──────────────────────────────────────────────────
-        self._status_item = rumps.MenuItem("Lade Modell…")
+        self._status_item = rumps.MenuItem("Lade whisper.cpp…")
         self._status_item.set_callback(None)
 
         # ── Verlauf (letzte 5 Transkriptionen) ────────────────────────────
@@ -318,6 +324,8 @@ class WhisperMacApp(rumps.App):
             self._translate_submenu[label] = item
             self._translate_menu_items[code] = item
 
+        self._live_item = rumps.MenuItem("Live-Transkription", callback=self._on_live_toggle)
+
         # ── Mikrofon-Untermenü ────────────────────────────────────────────
         self._mic_submenu    = rumps.MenuItem("Mikrofon")
         self._mic_menu_items = {}  # name -> (index, MenuItem)
@@ -340,6 +348,7 @@ class WhisperMacApp(rumps.App):
         menu = [self._status_item, None, self._hist_header]
         menu.extend(self._history_items)
         menu.extend([None, self._mic_submenu, self._lang_submenu, self._translate_submenu,
+                     self._live_item,
                      self._ki_item,
                      self._ki_auswahl_item,
                      rumps.MenuItem("Kürzel…  (F15)",         callback=self._on_shortcuts),
@@ -361,6 +370,8 @@ class WhisperMacApp(rumps.App):
         # Häkchen bei gespeicherter Auswahl setzen
         self._lang_menu_items[self.language]._menuitem.setState_(1)
         self._translate_menu_items[self._translate_to]._menuitem.setState_(1)
+        if self._live_transcription:
+            self._live_item._menuitem.setState_(1)
         if self._ki_korrektur:
             self._ki_item._menuitem.setState_(1)
         saved_mic = self._mic_device_name or "System (Standard)"
@@ -424,8 +435,13 @@ class WhisperMacApp(rumps.App):
     def _preload_model(self):
         self.recorder.warmup(device=self._mic_device_idx)
         self.overlay.prebuild()
-        self._set_ui(status="Lade Whisper-Modell…")
-        self.transcriber.preload()
+        self._set_ui(status="Lade whisper.cpp…")
+        try:
+            self.transcriber.preload()
+        except Exception as e:
+            logging.exception(f"whisper.cpp konnte nicht geladen werden: {e}")
+            self._set_ui(status="⚠ whisper.cpp konnte nicht geladen werden")
+            return
         if self._ki_korrektur:
             self._set_ui(status="Lade KI-Korrektor…")
             try:
@@ -445,14 +461,190 @@ class WhisperMacApp(rumps.App):
     # ── UI-Update (thread-safe) ───────────────────────────────────────────
 
     def _ready_status(self) -> str:
+        live = "Live: an" if self._live_transcription else "Live: aus"
         ki = "KI: aktiv" if self._ki_korrektur else "KI: aus"
-        return f"Bereit – fn halten zum Aufnehmen  |  {ki}  (2× fn zum Umschalten)"
+        return f"Bereit – fn halten zum Aufnehmen  |  {live}  |  {ki}  (2× fn zum Umschalten)"
 
     def _set_ui(self, status=None):
         def _update():
             if status is not None:
                 self._status_item.title = status
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_update)
+
+    _LIVE_TRANSCRIBE_INTERVAL = 0.35
+    _LIVE_MIN_AUDIO_SECONDS   = 0.45
+    _LIVE_FLUSH_GUARD_WORDS   = 1
+    _LIVE_MIN_FLUSH_WORDS     = 1
+    _LIVE_FIRST_PASS_GUARD_WORDS = 1
+
+    def _clear_mlx_cache(self):
+        try:
+            import mlx.core as mx
+            mx.metal.clear_cache()
+        except Exception:
+            pass
+
+    def _split_words(self, text: str) -> list[str]:
+        return text.strip().split() if text else []
+
+    def _join_words(self, words: list[str]) -> str:
+        return " ".join(words).strip()
+
+    def _common_prefix_len(self, left: list[str], right: list[str]) -> int:
+        count = 0
+        for a, b in zip(left, right):
+            if a != b:
+                break
+            count += 1
+        return count
+
+    def _transcribe_audio(self, audio, retry_lowercase: bool = True, live_pass: bool = False) -> str:
+        text = self.transcriber.transcribe(audio, language=self.language)
+        if retry_lowercase:
+            for retry in range(2):
+                if not (text and text == text.lower() and len(text.split()) >= 2):
+                    break
+                logging.info(f"Whisper: alles klein – Versuch {retry + 2}/3")
+                if not live_pass:
+                    self._set_ui(status=f"Wiederhole… ({retry + 2}/3)")
+                text = self.transcriber.transcribe(audio, language=self.language)
+        return text
+
+    def _prepare_output_text(self, text: str, final: bool = False) -> str:
+        text = (text or "").strip()
+        if not text or self._is_hallucination(text):
+            return ""
+        word_count = len(self._split_words(text))
+        if self._ki_korrektur and (final or word_count >= 3):
+            text = self.corrector.correct(
+                text,
+                max_tokens=16000 if final else 128,
+            ).strip()
+            self._clear_mlx_cache()
+        if text and self._translate_to:
+            try:
+                text = (
+                    GoogleTranslator(
+                        source=self.language or "auto",
+                        target=self._translate_to,
+                    ).translate(text)
+                    or text
+                )
+            except Exception as e:
+                logging.warning(f"Übersetzung fehlgeschlagen: {e}")
+        return (text or "").strip()
+
+    def _history_text_from_chunks(self, chunks: list[str]) -> str:
+        combined = " ".join(chunk.strip() for chunk in chunks if chunk and chunk.strip()).strip()
+        combined = re.sub(r"\s+([,.;:!?])", r"\1", combined)
+        return re.sub(r"\s{2,}", " ", combined).strip()
+
+    def _start_live_session(self, seq: int):
+        with self._live_state_lock:
+            self._live_session = {
+                "seq": seq,
+                "passes": 0,
+                "prev_words": [],
+                "committed_words": [],
+                "pending_words": [],
+                "inserted_chunks": [],
+            }
+        threading.Thread(target=self._live_transcribe_loop, args=(seq,), daemon=True).start()
+
+    def _session_uses_live(self, seq: int) -> bool:
+        with self._live_state_lock:
+            return self._live_session is not None and self._live_session["seq"] == seq
+
+    def _clear_live_session(self, seq: int):
+        with self._live_state_lock:
+            if self._live_session is not None and self._live_session["seq"] == seq:
+                self._live_session = None
+
+    def _live_transcribe_loop(self, seq: int):
+        min_samples = int(AudioRecorder.SAMPLE_RATE * self._LIVE_MIN_AUDIO_SECONDS)
+        while self._is_recording and self._transcription_seq == seq and self._live_transcription:
+            time.sleep(self._LIVE_TRANSCRIBE_INTERVAL)
+            if not self._is_recording or self._transcription_seq != seq:
+                return
+            audio = self.recorder.snapshot()
+            if audio is None or len(audio) < min_samples or self._is_silence(audio):
+                continue
+            if not self._transcribe_lock.acquire(blocking=False):
+                continue
+            try:
+                if not self._is_recording or self._transcription_seq != seq:
+                    return
+                text = self._transcribe_audio(audio, retry_lowercase=False, live_pass=True)
+                words = self._split_words(text)
+                if not words:
+                    continue
+                with self._live_state_lock:
+                    state = self._live_session
+                    if state is None or state["seq"] != seq:
+                        return
+                    state["passes"] += 1
+                    passes = state["passes"]
+                    known_len = len(state["committed_words"]) + len(state["pending_words"])
+                    if state["prev_words"]:
+                        stable_len = self._common_prefix_len(state["prev_words"], words)
+                    else:
+                        first_guard = self._LIVE_FIRST_PASS_GUARD_WORDS if len(words) >= 3 else 0
+                        stable_len = max(0, len(words) - first_guard)
+                    if stable_len > known_len:
+                        state["pending_words"].extend(words[known_len:stable_len])
+                    state["prev_words"] = words
+                self._flush_live_pending(seq, final=False)
+            except Exception as e:
+                logging.exception(f"Live-Transkription fehlgeschlagen: {e}")
+            finally:
+                self._transcribe_lock.release()
+
+    def _flush_live_pending(self, seq: int, final: bool):
+        with self._live_state_lock:
+            state = self._live_session
+            if state is None or state["seq"] != seq:
+                return
+            pending = state["pending_words"]
+            passes = state["passes"]
+            if not pending:
+                return
+            if final:
+                flush_count = len(pending)
+            elif passes <= 1:
+                flush_count = len(pending)
+            else:
+                flush_count = len(pending) - self._LIVE_FLUSH_GUARD_WORDS
+                if flush_count < self._LIVE_MIN_FLUSH_WORDS:
+                    return
+            raw_words = pending[:flush_count]
+            del pending[:flush_count]
+            state["committed_words"].extend(raw_words)
+
+        raw_text = self._join_words(raw_words)
+        prepared = self._prepare_output_text(raw_text, final=final)
+        if not prepared:
+            return
+        self._insert_with_workflows(prepared)
+        with self._live_state_lock:
+            state = self._live_session
+            if state is not None and state["seq"] == seq:
+                state["inserted_chunks"].append(prepared)
+
+    def _finalize_live_session(self, seq: int, final_text: str) -> str:
+        words = self._split_words(final_text)
+        with self._live_state_lock:
+            state = self._live_session
+            if state is None or state["seq"] != seq:
+                return ""
+            committed_len = len(state["committed_words"])
+            state["pending_words"] = words[committed_len:] if committed_len < len(words) else []
+        self._flush_live_pending(seq, final=True)
+        with self._live_state_lock:
+            state = self._live_session
+            history_text = self._history_text_from_chunks(state["inserted_chunks"]) if state else ""
+            if state is not None and state["seq"] == seq:
+                self._live_session = None
+        return history_text
 
     # ── fn-Taste abfangen ─────────────────────────────────────────────────
 
@@ -610,8 +802,13 @@ class WhisperMacApp(rumps.App):
             return
         self._is_recording = True
         self._transcription_seq += 1
+        if self._live_transcription:
+            self._start_live_session(self._transcription_seq)
+        else:
+            with self._live_state_lock:
+                self._live_session = None
         self._play_start_sound()
-        self._status_item.title = "Aufnahme läuft…"
+        self._status_item.title = "Live-Aufnahme läuft…" if self._live_transcription else "Aufnahme läuft…"
         self.recorder.start()
         self.overlay.show(lambda: self.recorder.current_level)
 
@@ -625,16 +822,21 @@ class WhisperMacApp(rumps.App):
         if not self._is_recording:
             return
         self.overlay.hide()
-        self._status_item.title = "Transkribiere…"
+        self._status_item.title = (
+            "Finalisiere…" if self._session_uses_live(self._transcription_seq) else "Transkribiere…"
+        )
         self._spinner.show()
         threading.Thread(target=self._transcribe_and_insert, daemon=True).start()
 
     def _transcribe_and_insert(self):
         my_seq = self._transcription_seq   # Sequenz beim Start merken
+        use_live_mode = self._session_uses_live(my_seq)
         audio  = self.recorder.stop()
         self._is_recording = False
 
         if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.3):
+            if use_live_mode:
+                self._clear_live_session(my_seq)
             self._spinner.hide()
             self._set_ui(status=self._ready_status())
             return
@@ -644,38 +846,32 @@ class WhisperMacApp(rumps.App):
         try:
             # Wurde inzwischen eine neue Aufnahme gestartet? → verwerfen
             if self._transcription_seq != my_seq:
+                if use_live_mode:
+                    self._clear_live_session(my_seq)
                 return
             if self._is_silence(audio):
+                if use_live_mode:
+                    self._clear_live_session(my_seq)
                 return
-            text = self.transcriber.transcribe(audio, language=self.language)
-            # Whisper-Quirk: manchmal alles kleingeschrieben → bis zu 3× wiederholen
-            for _retry in range(2):
-                if not (text and text == text.lower() and len(text.split()) >= 2):
-                    break
-                logging.info(f"Whisper: alles klein – Versuch {_retry + 2}/3")
-                self._set_ui(status=f"Wiederhole… ({_retry + 2}/3)")
-                text = self.transcriber.transcribe(audio, language=self.language)
-            try:
-                import mlx.core as mx
-                mx.metal.clear_cache()
-            except Exception:
-                pass
-            if text and not self._is_hallucination(text) and self._ki_korrektur:
-                self._set_ui(status="Korrigiere…")
-                text = self.corrector.correct(text)
-                try:
-                    mx.metal.clear_cache()
-                except Exception:
-                    pass
-            if text and self._translate_to:
-                text = GoogleTranslator(
-                    source=self.language or "auto",
-                    target=self._translate_to,
-                ).translate(text) or text
-            # Nochmals prüfen – fn könnte während der Transkription gedrückt worden sein
-            if text and not self._is_hallucination(text) and self._transcription_seq == my_seq:
-                self._insert_with_workflows(text)
-                self._add_to_history(text)
+            text = self._transcribe_audio(audio, retry_lowercase=True)
+            if use_live_mode:
+                history_text = self._finalize_live_session(my_seq, text)
+                if history_text:
+                    self._add_to_history(history_text)
+            else:
+                if text and not self._is_hallucination(text) and self._ki_korrektur:
+                    self._set_ui(status="Korrigiere…")
+                    text = self.corrector.correct(text)
+                    self._clear_mlx_cache()
+                if text and self._translate_to:
+                    text = GoogleTranslator(
+                        source=self.language or "auto",
+                        target=self._translate_to,
+                    ).translate(text) or text
+                # Nochmals prüfen – fn könnte während der Transkription gedrückt worden sein
+                if text and not self._is_hallucination(text) and self._transcription_seq == my_seq:
+                    self._insert_with_workflows(text)
+                    self._add_to_history(text)
         finally:
             self._spinner.hide()
             self._transcribe_lock.release()
@@ -1089,6 +1285,7 @@ end tell"""])
                 "language":     self.language,
                 "translate_to": self._translate_to,
                 "mic_device":   self._mic_device_name,
+                "live_transcription": self._live_transcription,
                 "ki_korrektur": self._ki_korrektur,
             })
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -1181,6 +1378,12 @@ end tell"""])
                 self._translate_menu_items[code]._menuitem.setState_(1)
                 self._save_settings()
                 break
+
+    def _on_live_toggle(self, sender):
+        self._live_transcription = not self._live_transcription
+        self._live_item._menuitem.setState_(1 if self._live_transcription else 0)
+        self._save_settings()
+        self._set_ui(status=self._ready_status())
 
     def _toggle_ki_mode(self):
         """KI-Modus per Doppeltipp an/ausschalten."""

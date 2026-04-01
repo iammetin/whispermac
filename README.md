@@ -9,17 +9,20 @@ WhisperMac lives in your menu bar and lets you dictate into any app, at any time
 ## Features
 
 - **Hold `fn` to record, release to insert** — transcribed text is pasted directly at the cursor, in any app
-- **Fully local & private** — uses [mlx-whisper](https://github.com/ml-explore/mlx-examples) on Apple Silicon; no internet connection needed
+- **Live transcription while speaking** — stable chunks can be inserted during dictation before you release the key
+- **Fully local & private** — uses a project-local [whisper.cpp](https://github.com/ggml-org/whisper.cpp) runtime and model; no cloud, no external API
 - **Workflows** — define trigger words that execute keyboard shortcuts or insert HTML (e.g. say *"bullet point"* → inserts `<ul><li></li></ul>` and positions the cursor)
 - **Shortcuts** — automatic word/phrase replacements applied after every transcription
 - **Multi-language** — supports German, English, Turkish, French, Spanish, Italian and auto-detection
 - **Live translation** — transcribe in one language, insert in another
 - **KI correction** — optional on-device LLM (Qwen via [mlx-lm](https://github.com/ml-explore/mlx-lm)) that grammatically corrects the transcription before inserting (editable prompt, toggle with `fn fn`)
+- **Live smoothing** — optional local LLM can also clean up live chunks by adding punctuation and removing filler words
 - **Smart spacing & capitalisation** — automatically adds a space before inserted text and capitalises after sentence-ending punctuation
 - **Transcription retry** — if Whisper returns an all-lowercase result (a known model quirk), it retries up to 3 times automatically
 - **Hallucination filter** — common Whisper hallucinations ("Danke schön.", "Thanks for watching.", …) are silently discarded
 - **History** — last 5 transcriptions accessible from the menu bar for quick re-paste
 - **Microphone selection** — pick any input device; list refreshes automatically when Bluetooth headphones connect
+- **Project-local runtime** — `whisper.cpp` server binary, libraries, Core ML encoder and model all live inside this project
 - **Hotkeys**
   - `F13` tap — delete last word
   - `F13` hold — delete current line
@@ -35,7 +38,7 @@ WhisperMac lives in your menu bar and lets you dictate into any app, at any time
 - macOS 13 Ventura or later
 - Apple Silicon Mac (M1 / M2 / M3 / M4)
 - Python 3.11
-- A Whisper model in MLX format (see below)
+- The bundled `whisper.cpp` runtime and `ggml-large-v3-turbo` model inside this project
 
 ---
 
@@ -52,7 +55,7 @@ chmod +x setup.sh && ./setup.sh
 The setup script will:
 - Check all requirements (macOS, Apple Silicon, Python 3.11, Homebrew)
 - Create a virtual environment and install all dependencies
-- Check whether your models are in place and show download instructions if not
+- Verify that the project-local `whisper.cpp` runtime and model are in place
 - Build the `.app` and install it to `/Applications`
 - Add WhisperMac to your Dock automatically
 
@@ -75,27 +78,19 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-#### 3. Download the Whisper model
+#### 3. whisper.cpp runtime / model
 
-WhisperMac requires a Whisper model in **MLX format** from Hugging Face. The model files go into the `models/whisper-modell/` folder.
+This project now uses a **project-local `whisper.cpp` runtime** and a **`ggml-large-v3-turbo` model**.
 
-The recommended model is `whisper-large-v3-turbo` — fast and accurate on Apple Silicon:
+Expected paths:
 
-```bash
-pip install huggingface_hub
-huggingface-cli download mlx-community/whisper-large-v3-turbo \
-    --local-dir models/whisper-modell
+```text
+vendor/whisper.cpp-runtime/build/bin/whisper-server
+models/whisper-cpp/ggml-large-v3-turbo.bin
+models/whisper-cpp/ggml-large-v3-turbo-encoder.mlmodelc/
 ```
 
-Other good options (all from [mlx-community](https://huggingface.co/mlx-community) on Hugging Face):
-
-| Model | Size | Speed | Accuracy |
-|-------|------|-------|----------|
-| `mlx-community/whisper-large-v3-turbo` | ~3 GB | ★★★★ | ★★★★★ |
-| `mlx-community/whisper-large-v3-turbo-q4` | ~1 GB | ★★★★★ | ★★★★ |
-| `mlx-community/whisper-large-v3` | ~6 GB | ★★★ | ★★★★★ |
-
-> **Important:** The model must be in MLX format (`.safetensors`). Standard PyTorch models will not work.
+If those files are present, nothing else is required for speech recognition.
 
 #### 4. Build and run
 

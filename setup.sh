@@ -72,32 +72,31 @@ success "Python 3.11 gefunden ($PYTHON_BIN)"
 header "2 / 5  Modelle prüfen"
 # ══════════════════════════════════════════════════════════════════
 
-WHISPER_DIR="$SCRIPT_DIR/models/whisper-modell"
+WHISPER_MODEL="$SCRIPT_DIR/models/whisper-cpp/ggml-large-v3-turbo.bin"
+WHISPER_COREML_DIR="$SCRIPT_DIR/models/whisper-cpp/ggml-large-v3-turbo-encoder.mlmodelc"
+WHISPER_SERVER_BIN="$SCRIPT_DIR/vendor/whisper.cpp-runtime/build/bin/whisper-server"
 LLM_DIR="$SCRIPT_DIR/models/llm"
 WHISPER_OK=false
 LLM_OK=false
 
-# Whisper-Modell prüfen (mindestens eine .safetensors Datei)
-if ls "$WHISPER_DIR"/*.safetensors &>/dev/null; then
+# whisper.cpp Runtime + Modell prüfen
+if [[ -f "$WHISPER_MODEL" && -d "$WHISPER_COREML_DIR" && -x "$WHISPER_SERVER_BIN" ]]; then
     WHISPER_OK=true
-    success "Whisper-Modell gefunden"
+    success "whisper.cpp Runtime und Modell gefunden"
 else
     echo ""
-    warn "Kein Whisper-Modell in models/whisper-modell/ gefunden."
+    warn "whisper.cpp Runtime oder Modell fehlen im Projekt."
     echo ""
-    echo -e "  ${BOLD}Modell herunterladen (empfohlen):${RESET}"
+    echo -e "  ${BOLD}Erwartete Dateien:${RESET}"
     echo ""
-    echo "  pip install huggingface_hub"
-    echo "  huggingface-cli download mlx-community/whisper-large-v3-turbo \\"
-    echo "      --local-dir \"$WHISPER_DIR\""
+    echo "  • $WHISPER_SERVER_BIN"
+    echo "  • $WHISPER_MODEL"
+    echo "  • $WHISPER_COREML_DIR"
     echo ""
-    echo "  Weitere Optionen auf Hugging Face: https://huggingface.co/mlx-community"
-    echo "  (nach 'whisper' suchen, MLX-Format wählen)"
-    echo ""
-    read -p "  Ohne Whisper-Modell fortfahren? (App startet dann nicht) [j/N] " -n 1 -r
+    read -p "  Ohne whisper.cpp Runtime fortfahren? (App startet dann nicht) [j/N] " -n 1 -r
     echo ""
     if [[ ! $REPLY =~ ^[Jj]$ ]]; then
-        echo "  Bitte Modell herunterladen und setup.sh erneut ausführen."
+        echo "  Bitte Runtime/Modell bereitstellen und setup.sh erneut ausführen."
         exit 0
     fi
 fi
@@ -126,7 +125,7 @@ else
 fi
 
 # Abhängigkeiten nur installieren wenn noch nicht vorhanden
-if ! "$VENV/bin/python" -c "import mlx_whisper, rumps, sounddevice" &>/dev/null; then
+if ! "$VENV/bin/python" -c "import rumps, sounddevice, deep_translator" &>/dev/null; then
     info "Abhängigkeiten werden installiert..."
     "$VENV/bin/pip" install --upgrade pip --quiet
     "$VENV/bin/pip" install -r "$SCRIPT_DIR/requirements.txt" --quiet

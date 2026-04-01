@@ -13,7 +13,9 @@ _GLOBAL_PREFIX = (
 _SYSTEM_PROMPT = (
     "Du bist ein Grammatik-Korrekturdienst für Spracherkennung. "
     "Korrigiere den deutschen Text grammatikalisch (Groß-/Kleinschreibung, "
-    "Zeichensetzung, Beugung). Behalte den Originalwortlaut so weit wie möglich. "
+    "Zeichensetzung, Beugung). Entferne reine Füllwörter wie 'äh', 'ähm' oder "
+    "'hm' sowie offensichtliche Selbstkorrekturen, wenn der Satz dadurch "
+    "natürlicher wird. Behalte den Originalwortlaut sonst so weit wie möglich. "
     "Antworte ausschließlich mit dem korrigierten Text – keine Erklärungen, "
     "keine Anmerkungen."
 )
@@ -32,7 +34,7 @@ class TextCorrector:
         self._model, self._tokenizer = load(self.model_path)
         logging.info("Korrektor-Modell geladen.")
 
-    def correct(self, text: str, system_prompt: str = None) -> str:
+    def correct(self, text: str, system_prompt: str = None, max_tokens: int = 16000) -> str:
         if self._model is None or self._tokenizer is None:
             return text
         try:
@@ -63,7 +65,7 @@ class TextCorrector:
             result = generate(
                 self._model, self._tokenizer,
                 prompt=prompt,
-                max_tokens=16000,
+                max_tokens=max_tokens,
                 verbose=False,
                 sampler=sampler,
                 logits_processors=logits_processors,

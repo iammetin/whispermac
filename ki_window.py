@@ -14,6 +14,16 @@ SETTINGS_FILE = os.path.expanduser("~/.whispermac_settings.json")
 DEFAULT_LIVE_PROMPT = (
     "Du bist ein Grammatik-Korrekturdienst für Spracherkennung. "
     "Korrigiere den deutschen Text grammatikalisch (Groß-/Kleinschreibung, "
+    "Zeichensetzung, Beugung). Entferne reine Füllwörter wie 'äh', 'ähm' oder "
+    "'hm' sowie offensichtliche Selbstkorrekturen, wenn der Satz dadurch "
+    "natürlicher wird. Behalte den Originalwortlaut sonst so weit wie möglich. "
+    "Antworte ausschließlich mit dem korrigierten Text – keine Erklärungen, "
+    "keine Anmerkungen."
+)
+
+LEGACY_LIVE_PROMPT = (
+    "Du bist ein Grammatik-Korrekturdienst für Spracherkennung. "
+    "Korrigiere den deutschen Text grammatikalisch (Groß-/Kleinschreibung, "
     "Zeichensetzung, Beugung). Behalte den Originalwortlaut so weit wie möglich. "
     "Antworte ausschließlich mit dem korrigierten Text – keine Erklärungen, "
     "keine Anmerkungen."
@@ -54,6 +64,10 @@ def _ensure_prompts(data: dict, key: str, default: str) -> list:
         else:
             fallback = default
         prompts = [{"id": "default", "name": "Standard", "prompt": fallback, "active": True}]
+    elif key == "ki_live_prompts":
+        for prompt in prompts:
+            if prompt.get("id") == "default" and prompt.get("prompt") == LEGACY_LIVE_PROMPT:
+                prompt["prompt"] = default
     # Genau einer muss aktiv sein
     if not any(p.get("active") for p in prompts):
         prompts[0]["active"] = True

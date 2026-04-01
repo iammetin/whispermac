@@ -8,6 +8,7 @@ models/whisper-modell/*
 # llm: Ordner tracken, Inhalt ignorieren
 models/llm/*
 !models/llm/.gitkeep
+models/whisper-cpp/*
 
 # Alle anderen Modell-Ordner komplett ignorieren
 models/whisper 8bit/
