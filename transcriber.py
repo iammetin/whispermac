@@ -125,7 +125,16 @@ class Transcriber:
             errors = []
             # CoreML-Encoder wird von whisper.cpp aus dem Modellnamen abgeleitet.
             # Wenn kein passender Encoder existiert, GPU-Versuch überspringen.
-            coreml_encoder = self.model_path[:-4] + "-encoder.mlmodelc" if self.model_path.endswith(".bin") else self.model_path + "-encoder.mlmodelc"
+            _QUANT_SUFFIXES = ("_q5_0", "_q4_0", "_q8_0", "_q5_1", "_q4_1",
+                               "_q2_k", "_q3_k", "_q4_k", "_q5_k", "_q6_k")
+            _stem = os.path.basename(self.model_path)
+            if _stem.endswith(".bin"):
+                _stem = _stem[:-4]
+            for _suf in _QUANT_SUFFIXES:
+                if _stem.endswith(_suf):
+                    _stem = _stem[:-len(_suf)]
+                    break
+            coreml_encoder = os.path.join(os.path.dirname(self.model_path), _stem + "-encoder.mlmodelc")
             has_coreml = os.path.isdir(coreml_encoder)
             attempts = [True, False] if (self.use_gpu and has_coreml) else [False]
 

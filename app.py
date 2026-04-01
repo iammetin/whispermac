@@ -89,17 +89,17 @@ else:
     MENUBAR_ICON       = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
 def _find_model(models_dir: str) -> str:
-    """Nimmt die erste .bin-Datei im Modell-Ordner."""
+    """Nimmt die erste .bin-Datei im Modell-Ordner (alphabetisch)."""
     bins = sorted(f for f in os.listdir(models_dir) if f.endswith(".bin"))
     if not bins:
         raise FileNotFoundError(f"Kein GGML-Modell (.bin) in {models_dir} gefunden.")
     return os.path.join(models_dir, bins[0])
 
 def _ensure_coreml_encoder(model_path: str) -> None:
-    """Stellt sicher, dass ein CoreML-Encoder für das Modell verfügbar ist.
-    whisper.cpp leitet den Encoder-Namen ab, indem es .bin UND Quantisierungs-
-    Suffixe (_q5_0, _q4_0 usw.) aus dem Dateinamen entfernt.
-    Falls der erwartete Encoder fehlt, wird ein Symlink auf einen vorhandenen erstellt."""
+    """Erstellt bei Bedarf einen Symlink auf einen vorhandenen CoreML-Encoder.
+    whisper.cpp leitet den Encoder-Namen ab, indem es .bin und Quantisierungs-
+    Suffixe (_q5_0 usw.) entfernt. Falls der erwartete Encoder-Ordner fehlt
+    aber ein anderer vorhanden ist, wird ein Symlink gesetzt."""
     import glob as _glob
     _QUANT_SUFFIXES = ("_q5_0", "_q4_0", "_q8_0", "_q5_1", "_q4_1",
                        "_q2_k", "_q3_k", "_q4_k", "_q5_k", "_q6_k")
@@ -123,8 +123,42 @@ def _ensure_coreml_encoder(model_path: str) -> None:
     except Exception as e:
         logging.warning(f"CoreML-Encoder Symlink fehlgeschlagen: {e}")
 
+def _setup_coreml_cache(models_dir: str) -> None:
+    """Legt den CoreML-ANE-Cache in den Modell-Ordner, damit alles an einem Ort ist.
+    ~/Library/Caches/whisper-server/ wird als Symlink auf models/whisper-cpp/.cache/ gesetzt.
+    Vorhandene Cache-Einträge werden dorthin verschoben."""
+    import shutil
+    project_cache = os.path.join(models_dir, ".cache")
+    system_cache  = os.path.expanduser("~/Library/Caches/whisper-server")
+    os.makedirs(project_cache, exist_ok=True)
+    if os.path.islink(system_cache):
+        if os.path.realpath(system_cache) == os.path.realpath(project_cache):
+            return  # Symlink zeigt bereits auf richtiges Ziel
+        os.remove(system_cache)
+    elif os.path.isdir(system_cache):
+        # Vorhandene Cache-Einträge verschieben, dann Verzeichnis ersetzen
+        for item in os.listdir(system_cache):
+            src = os.path.join(system_cache, item)
+            dst = os.path.join(project_cache, item)
+            if not os.path.exists(dst):
+                try:
+                    shutil.move(src, dst)
+                except Exception as e:
+                    logging.warning(f"Cache-Migration fehlgeschlagen ({item}): {e}")
+        try:
+            shutil.rmtree(system_cache)
+        except Exception as e:
+            logging.warning(f"Cache-Ordner konnte nicht entfernt werden: {e}")
+            return
+    try:
+        os.symlink(project_cache, system_cache)
+        logging.info(f"CoreML-Cache → {project_cache}")
+    except Exception as e:
+        logging.warning(f"CoreML-Cache Symlink fehlgeschlagen: {e}")
+
 MODEL_PATH = _find_model(_MODELS_DIR)
 _ensure_coreml_encoder(MODEL_PATH)
+_setup_coreml_cache(_MODELS_DIR)
 
 SETTINGS_FILE = os.path.expanduser("~/.whispermac_settings.json")
 FN_FLAG      = kCGEventFlagMaskSecondaryFn   # 0x800000
