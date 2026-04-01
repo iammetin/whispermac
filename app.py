@@ -75,16 +75,25 @@ from workflows_window import WorkflowsWindowController
 
 # Pfade: funktioniert sowohl als Skript als auch als gebaute .app
 if getattr(sys, "frozen", False):
-    MODEL_PATH         = os.path.expanduser("~/WhisperMac/models/whisper-cpp/ggml-large-v3-turbo.bin")
+    _MODELS_DIR        = os.path.expanduser("~/WhisperMac/models/whisper-cpp")
     WHISPER_SERVER_BIN = os.path.expanduser("~/WhisperMac/vendor/whisper.cpp-runtime/build/bin/whisper-server")
     CORRECTOR_PATH     = os.path.expanduser("~/WhisperMac/models/llm")
     MENUBAR_ICON       = os.path.expanduser("~/WhisperMac/Assets/menubar.png")
 else:
     BASE_DIR           = os.path.dirname(os.path.abspath(__file__))
-    MODEL_PATH         = os.path.join(BASE_DIR, "models", "whisper-cpp", "ggml-large-v3-turbo.bin")
+    _MODELS_DIR        = os.path.join(BASE_DIR, "models", "whisper-cpp")
     WHISPER_SERVER_BIN = os.path.join(BASE_DIR, "vendor", "whisper.cpp-runtime", "build", "bin", "whisper-server")
     CORRECTOR_PATH     = os.path.join(BASE_DIR, "models", "llm")
     MENUBAR_ICON       = os.path.join(BASE_DIR, "Assets", "menubar.png")
+
+def _find_model(models_dir: str) -> str:
+    """Nimmt die erste .bin-Datei im Modell-Ordner."""
+    bins = sorted(f for f in os.listdir(models_dir) if f.endswith(".bin"))
+    if not bins:
+        raise FileNotFoundError(f"Kein GGML-Modell (.bin) in {models_dir} gefunden.")
+    return os.path.join(models_dir, bins[0])
+
+MODEL_PATH = _find_model(_MODELS_DIR)
 
 SETTINGS_FILE = os.path.expanduser("~/.whispermac_settings.json")
 FN_FLAG      = kCGEventFlagMaskSecondaryFn   # 0x800000
