@@ -1,6 +1,7 @@
 """
 WhisperMac – Kürzel-Fenster (überarbeitetes Design)
 """
+import json
 import AppKit
 import objc
 from shortcuts import load_shortcuts, save_shortcuts
@@ -195,7 +196,7 @@ class ShortcutsWindowController(AppKit.NSObject):
 
         # Hinweis-Text
         hint = AppKit.NSTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(82, 13, W - 94, 18)
+            AppKit.NSMakeRect(82, 13, W - 294, 18)
         )
         hint.setStringValue_("Doppelklick auf eine Zelle zum Bearbeiten")
         hint.setFont_(AppKit.NSFont.systemFontOfSize_(11.0))
@@ -206,6 +207,28 @@ class ShortcutsWindowController(AppKit.NSObject):
         hint.setSelectable_(False)
         hint.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         cv.addSubview_(hint)
+
+        # Export-Button
+        btn_export = AppKit.NSButton.alloc().initWithFrame_(
+            AppKit.NSMakeRect(W - 196, 9, 88, 26)
+        )
+        btn_export.setTitle_("Exportieren")
+        btn_export.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        btn_export.setTarget_(self)
+        btn_export.setAction_("onExport:")
+        btn_export.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+        cv.addSubview_(btn_export)
+
+        # Import-Button
+        btn_import = AppKit.NSButton.alloc().initWithFrame_(
+            AppKit.NSMakeRect(W - 100, 9, 88, 26)
+        )
+        btn_import.setTitle_("Importieren")
+        btn_import.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        btn_import.setTarget_(self)
+        btn_import.setAction_("onImport:")
+        btn_import.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+        cv.addSubview_(btn_import)
 
         self._win   = win
         self._table = table
@@ -244,3 +267,43 @@ class ShortcutsWindowController(AppKit.NSObject):
         del self._ds._filtered[row]
         self._table.reloadData()
         self._ds._save()
+
+    def onExport_(self, sender):
+        panel = AppKit.NSSavePanel.savePanel()
+        panel.setTitle_("Kürzel exportieren")
+        panel.setAllowedFileTypes_(["json"])
+        panel.setNameFieldStringValue_("whispermac_shortcuts.json")
+        if panel.runModal() == AppKit.NSModalResponseOK:
+            path = panel.URL().path()
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(load_shortcuts(), f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                alert = AppKit.NSAlert.alloc().init()
+                alert.setMessageText_("Fehler beim Exportieren")
+                alert.setInformativeText_(str(e))
+                alert.runModal()
+
+    def onImport_(self, sender):
+        panel = AppKit.NSOpenPanel.openPanel()
+        panel.setTitle_("Kürzel importieren")
+        panel.setAllowedFileTypes_(["json"])
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        if panel.runModal() == AppKit.NSModalResponseOK:
+            path = panel.URL().path()
+            try:
+                with open(path, encoding="utf-8") as f:
+                    imported = json.load(f)
+                if not isinstance(imported, dict):
+                    raise ValueError("Ungültiges Dateiformat – erwartet ein Kürzel-Objekt.")
+                existing = load_shortcuts()
+                existing.update(imported)
+                save_shortcuts(existing)
+                self._ds.reload()
+                self._table.reloadData()
+            except Exception as e:
+                alert = AppKit.NSAlert.alloc().init()
+                alert.setMessageText_("Fehler beim Importieren")
+                alert.setInformativeText_(str(e))
+                alert.runModal()

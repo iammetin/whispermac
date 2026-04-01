@@ -1,6 +1,7 @@
 """
 WhisperMac – Workflows-Fenster
 """
+import json
 import AppKit
 import objc
 from workflows import load_workflows, save_workflows
@@ -234,6 +235,28 @@ class WorkflowsWindowController(AppKit.NSObject):
         )
         cv.addSubview_(seg)
 
+        # Export-Button
+        btn_export = AppKit.NSButton.alloc().initWithFrame_(
+            AppKit.NSMakeRect(W - 196, 9, 88, 26)
+        )
+        btn_export.setTitle_("Exportieren")
+        btn_export.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        btn_export.setTarget_(self)
+        btn_export.setAction_("onExport:")
+        btn_export.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+        cv.addSubview_(btn_export)
+
+        # Import-Button
+        btn_import = AppKit.NSButton.alloc().initWithFrame_(
+            AppKit.NSMakeRect(W - 100, 9, 88, 26)
+        )
+        btn_import.setTitle_("Importieren")
+        btn_import.setBezelStyle_(AppKit.NSBezelStyleRounded)
+        btn_import.setTarget_(self)
+        btn_import.setAction_("onImport:")
+        btn_import.setAutoresizingMask_(AppKit.NSViewMinXMargin)
+        cv.addSubview_(btn_import)
+
         self._win   = win
         self._table = table
         self._ds    = ds
@@ -271,6 +294,52 @@ class WorkflowsWindowController(AppKit.NSObject):
         del self._ds._filtered[row]
         self._table.reloadData()
         self._ds._save()
+
+    def onExport_(self, sender):
+        panel = AppKit.NSSavePanel.savePanel()
+        panel.setTitle_("Workflows exportieren")
+        panel.setAllowedFileTypes_(["json"])
+        panel.setNameFieldStringValue_("whispermac_workflows.json")
+        if panel.runModal() == AppKit.NSModalResponseOK:
+            path = panel.URL().path()
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(load_workflows(), f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                alert = AppKit.NSAlert.alloc().init()
+                alert.setMessageText_("Fehler beim Exportieren")
+                alert.setInformativeText_(str(e))
+                alert.runModal()
+
+    def onImport_(self, sender):
+        panel = AppKit.NSOpenPanel.openPanel()
+        panel.setTitle_("Workflows importieren")
+        panel.setAllowedFileTypes_(["json"])
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        if panel.runModal() == AppKit.NSModalResponseOK:
+            path = panel.URL().path()
+            try:
+                with open(path, encoding="utf-8") as f:
+                    imported = json.load(f)
+                if not isinstance(imported, list):
+                    raise ValueError("Ungültiges Dateiformat – erwartet eine Workflow-Liste.")
+                existing = load_workflows()
+                existing_triggers = {w.get("trigger", "").lower(): i for i, w in enumerate(existing)}
+                for wf in imported:
+                    trigger = wf.get("trigger", "").lower()
+                    if trigger in existing_triggers:
+                        existing[existing_triggers[trigger]] = wf
+                    else:
+                        existing.append(wf)
+                save_workflows(existing)
+                self._ds.reload()
+                self._table.reloadData()
+            except Exception as e:
+                alert = AppKit.NSAlert.alloc().init()
+                alert.setMessageText_("Fehler beim Importieren")
+                alert.setInformativeText_(str(e))
+                alert.runModal()
 
 
 # ── Hilfsfunktion ─────────────────────────────────────────────────────────
