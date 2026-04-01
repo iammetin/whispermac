@@ -547,9 +547,8 @@ class WhisperMacApp(rumps.App):
 
     _LIVE_TRANSCRIBE_INTERVAL = 0.18
     _LIVE_MIN_AUDIO_SECONDS   = 0.25
-    _LIVE_FLUSH_GUARD_WORDS   = 0
-    _LIVE_MIN_FLUSH_WORDS     = 1
-    _LIVE_FIRST_PASS_GUARD_WORDS = 0
+    _LIVE_MUTABLE_TAIL_WORDS  = 4
+    _LIVE_PAUSE_FINALIZE_SECONDS = 0.35
     _LIVE_LLM_MIN_WORDS       = 8
 
     def _clear_mlx_cache(self):
@@ -577,6 +576,27 @@ class WhisperMacApp(rumps.App):
         text = re.sub(r"\s+([,.;:!?])", r"\1", text)
         text = re.sub(r"\s{2,}", " ", text)
         return text.strip()
+
+    def _trailing_silence_seconds(self, audio) -> float:
+        import numpy as np
+
+        if audio is None or len(audio) == 0:
+            return 0.0
+
+        frame_samples = max(1, int(AudioRecorder.SAMPLE_RATE * 0.02))
+        silence_samples = 0
+        end = len(audio)
+
+        while end > 0:
+            start = max(0, end - frame_samples)
+            chunk = audio[start:end].astype(np.float32)
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+            if rms >= self._SILENCE_RMS_THRESHOLD:
+                break
+            silence_samples += end - start
+            end = start
+
+        return silence_samples / AudioRecorder.SAMPLE_RATE
 
     def _transcribe_audio(self, audio, retry_lowercase: bool = True, live_pass: bool = False) -> str:
         text = self.transcriber.transcribe(audio, language=self.language)
@@ -645,6 +665,7 @@ class WhisperMacApp(rumps.App):
                 "seq": seq,
                 "passes": 0,
                 "prev_words": [],
+                "frozen_words": [],
                 "displayed_text": "",
                 "history_text": "",
                 "needs_leading_space": needs_leading_space,
@@ -670,6 +691,7 @@ class WhisperMacApp(rumps.App):
             audio = self.recorder.snapshot()
             if audio is None or len(audio) < min_samples or self._is_silence(audio):
                 continue
+            pause_finalize = self._trailing_silence_seconds(audio) >= self._LIVE_PAUSE_FINALIZE_SECONDS
             if not self._transcribe_lock.acquire(blocking=False):
                 continue
             try:
@@ -684,12 +706,7 @@ class WhisperMacApp(rumps.App):
                     if state is None or state["seq"] != seq:
                         return
                     state["passes"] += 1
-                    passes = state["passes"]
-                    guard_words = self._LIVE_FIRST_PASS_GUARD_WORDS if passes <= 1 else self._LIVE_FLUSH_GUARD_WORDS
-                    display_len = max(0, len(words) - guard_words)
-                    raw_display_text = self._join_words(words[:display_len])
-                    state["prev_words"] = words
-                self._sync_live_text(seq, raw_display_text, final=False)
+                self._sync_live_text(seq, words, final=False, pause_finalize=pause_finalize)
             except Exception as e:
                 logging.exception(f"Live-Transkription fehlgeschlagen: {e}")
             finally:
@@ -709,6 +726,14 @@ class WhisperMacApp(rumps.App):
     def _ax_text_length(self, text: str) -> int:
         return int(AppKit.NSString.stringWithString_(text or "").length())
 
+    def _common_prefix_text(self, left: str, right: str) -> str:
+        count = 0
+        for a, b in zip(left, right):
+            if a != b:
+                break
+            count += 1
+        return left[:count]
+
     def _replace_recent_text(self, old_text: str, new_text: str) -> bool:
         old_len = self._ax_text_length(old_text)
         if old_len <= 0:
@@ -718,6 +743,20 @@ class WhisperMacApp(rumps.App):
                 return True
             pb = AppKit.NSPasteboard.generalPasteboard()
             return self._paste_plain_text(new_text, pb)
+
+        common_prefix = self._common_prefix_text(old_text, new_text)
+        prefix_len = self._ax_text_length(common_prefix)
+        old_tail = old_text[len(common_prefix):]
+        new_tail = new_text[len(common_prefix):]
+        old_tail_len = self._ax_text_length(old_tail)
+
+        if old_tail_len <= 0:
+            if not new_tail:
+                return True
+            if self._insert_plain_text(new_tail):
+                return True
+            pb = AppKit.NSPasteboard.generalPasteboard()
+            return self._paste_plain_text(new_tail, pb)
 
         try:
             from ApplicationServices import (
@@ -737,37 +776,43 @@ class WhisperMacApp(rumps.App):
                     match = re.search(r"location:(\d+)", str(sel_range))
                     if match:
                         cursor_loc = int(match.group(1))
-                        start = max(0, cursor_loc - old_len)
-                        range_value = AXValueCreate(kAXValueCFRangeType, CFRangeMake(start, old_len))
+                        start = max(0, cursor_loc - old_len + prefix_len)
+                        range_value = AXValueCreate(kAXValueCFRangeType, CFRangeMake(start, old_tail_len))
                         err = AXUIElementSetAttributeValue(focused, "AXSelectedTextRange", range_value)
                         if err == 0:
                             err = AXUIElementSetAttributeValue(
                                 focused,
                                 "AXSelectedText",
-                                AppKit.NSString.stringWithString_(new_text),
+                                AppKit.NSString.stringWithString_(new_tail),
                             )
                             if err == 0:
                                 logging.debug(
-                                    "AX replace ok old_len=%s new_len=%s",
-                                    old_len,
-                                    self._ax_text_length(new_text),
+                                    "AX replace ok prefix_len=%s old_tail_len=%s new_tail_len=%s",
+                                    prefix_len,
+                                    old_tail_len,
+                                    self._ax_text_length(new_tail),
                                 )
                                 return True
         except Exception as e:
             logging.debug(f"AX replace exception: {e}")
 
-        logging.debug("AX replace failed, fallback via backspace")
-        for _ in range(old_len):
+        logging.debug(
+            "AX replace failed, fallback via backspace prefix_len=%s old_tail_len=%s new_tail_len=%s",
+            prefix_len,
+            old_tail_len,
+            self._ax_text_length(new_tail),
+        )
+        for _ in range(old_tail_len):
             down = CGEventCreateKeyboardEvent(None, 51, True)
             CGEventPost(kCGHIDEventTap, down)
             up = CGEventCreateKeyboardEvent(None, 51, False)
             CGEventPost(kCGHIDEventTap, up)
-        if not new_text:
+        if not new_tail:
             return True
-        if self._insert_plain_text(new_text):
+        if self._insert_plain_text(new_tail):
             return True
         pb = AppKit.NSPasteboard.generalPasteboard()
-        return self._paste_plain_text(new_text, pb)
+        return self._paste_plain_text(new_tail, pb)
 
     def _update_insert_tracking(self, text: str):
         if not text:
@@ -775,7 +820,7 @@ class WhisperMacApp(rumps.App):
         self._last_insert_ends_with_word = text[-1] not in (" ", "\n", "\t", "\r")
         self._last_insert_ends_with_sentence = text[-1] in (".", "!", "?")
 
-    def _sync_live_text(self, seq: int, raw_text: str, final: bool):
+    def _sync_live_text(self, seq: int, words: list[str], final: bool, pause_finalize: bool = False):
         with self._live_state_lock:
             state = self._live_session
             if state is None or state["seq"] != seq:
@@ -783,7 +828,27 @@ class WhisperMacApp(rumps.App):
             old_displayed = state["displayed_text"]
             needs_leading_space = state["needs_leading_space"]
             after_sentence_end = state["after_sentence_end"]
+            prev_words = state["prev_words"]
+            frozen_words = state["frozen_words"]
 
+            if final or pause_finalize:
+                render_words = words[:]
+                state["frozen_words"] = words[:]
+            else:
+                if prev_words:
+                    stable_len = self._common_prefix_len(prev_words, words)
+                else:
+                    stable_len = 0
+                freeze_upto = max(0, stable_len - self._LIVE_MUTABLE_TAIL_WORDS)
+                freeze_upto = min(len(words), freeze_upto)
+                if freeze_upto > len(frozen_words):
+                    frozen_words = words[:freeze_upto]
+                    state["frozen_words"] = frozen_words
+                render_words = frozen_words + words[len(frozen_words):]
+
+            state["prev_words"] = words[:]
+
+        raw_text = self._join_words(render_words)
         prepared = self._prepare_output_text(raw_text, final=final)
         display_text = self._apply_live_context(prepared, needs_leading_space, after_sentence_end)
         history_text = display_text.lstrip()
@@ -805,7 +870,7 @@ class WhisperMacApp(rumps.App):
         return history_text
 
     def _finalize_live_session(self, seq: int, final_text: str) -> str:
-        history_text = self._sync_live_text(seq, final_text, final=True)
+        history_text = self._sync_live_text(seq, self._split_words(final_text), final=True)
         with self._live_state_lock:
             state = self._live_session
             if state is None or state["seq"] != seq:
