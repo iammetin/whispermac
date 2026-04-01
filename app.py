@@ -93,7 +93,36 @@ def _find_model(models_dir: str) -> str:
         raise FileNotFoundError(f"Kein GGML-Modell (.bin) in {models_dir} gefunden.")
     return os.path.join(models_dir, bins[0])
 
+def _ensure_coreml_encoder(model_path: str) -> None:
+    """Stellt sicher, dass ein CoreML-Encoder für das Modell verfügbar ist.
+    whisper.cpp leitet den Encoder-Namen ab, indem es .bin UND Quantisierungs-
+    Suffixe (_q5_0, _q4_0 usw.) aus dem Dateinamen entfernt.
+    Falls der erwartete Encoder fehlt, wird ein Symlink auf einen vorhandenen erstellt."""
+    import glob as _glob
+    _QUANT_SUFFIXES = ("_q5_0", "_q4_0", "_q8_0", "_q5_1", "_q4_1",
+                       "_q2_k", "_q3_k", "_q4_k", "_q5_k", "_q6_k")
+    model_dir  = os.path.dirname(model_path)
+    model_stem = os.path.basename(model_path)
+    if model_stem.endswith(".bin"):
+        model_stem = model_stem[:-4]
+    for suf in _QUANT_SUFFIXES:
+        if model_stem.endswith(suf):
+            model_stem = model_stem[:-len(suf)]
+            break
+    expected = os.path.join(model_dir, model_stem + "-encoder.mlmodelc")
+    if os.path.exists(expected):
+        return
+    available = sorted(_glob.glob(os.path.join(model_dir, "*-encoder.mlmodelc")))
+    if not available:
+        return
+    try:
+        os.symlink(available[0], expected)
+        logging.info(f"CoreML-Encoder Symlink: {os.path.basename(expected)} → {os.path.basename(available[0])}")
+    except Exception as e:
+        logging.warning(f"CoreML-Encoder Symlink fehlgeschlagen: {e}")
+
 MODEL_PATH = _find_model(_MODELS_DIR)
+_ensure_coreml_encoder(MODEL_PATH)
 
 SETTINGS_FILE = os.path.expanduser("~/.whispermac_settings.json")
 FN_FLAG      = kCGEventFlagMaskSecondaryFn   # 0x800000

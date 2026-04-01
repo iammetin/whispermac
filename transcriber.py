@@ -126,7 +126,11 @@ class Transcriber:
 
             self._cleanup_stale_servers()
             errors = []
-            attempts = [True, False] if self.use_gpu else [False]
+            # CoreML-Encoder wird von whisper.cpp aus dem Modellnamen abgeleitet.
+            # Wenn kein passender Encoder existiert, GPU-Versuch überspringen.
+            coreml_encoder = self.model_path[:-4] + "-encoder.mlmodelc" if self.model_path.endswith(".bin") else self.model_path + "-encoder.mlmodelc"
+            has_coreml = os.path.isdir(coreml_encoder)
+            attempts = [True, False] if (self.use_gpu and has_coreml) else [False]
 
             for use_gpu in attempts:
                 self.close()
