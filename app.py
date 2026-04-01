@@ -331,6 +331,7 @@ class WhisperMacApp(rumps.App):
         self._fn_last_release_time  = None   # Zeitpunkt des letzten fn-Loslassens
         self._fn_last_hold_duration = 0.0    # Haltedauer des letzten fn-Drucks
         self._fn_is_double_tap      = False  # Zweiter Tipp eines Doppeltipps
+        self._recording_live_active = False
         self._transcribe_lock = threading.Lock()
         self._transcription_seq  = 0   # Jeder fn-Druck erhöht diesen Zähler
         self._live_state_lock = threading.Lock()
@@ -825,6 +826,19 @@ class WhisperMacApp(rumps.App):
         )
         return is_terminal
 
+    def _should_use_live_for_current_target(self) -> bool:
+        if not self._live_transcription:
+            return False
+        if self._is_terminal_target():
+            bundle_id, name = self._frontmost_app_identity()
+            logging.info(
+                "Live-Transkription für diese Session automatisch deaktiviert: bundle=%s name=%s",
+                bundle_id or "-",
+                name or "-",
+            )
+            return False
+        return True
+
     def _post_key(self, keycode: int, flags: int = 0):
         down = CGEventCreateKeyboardEvent(None, keycode, True)
         if flags:
@@ -1152,14 +1166,16 @@ class WhisperMacApp(rumps.App):
         if self._is_recording:
             return
         self._is_recording = True
+        self._recording_live_active = False
         self._transcription_seq += 1
-        if self._live_transcription:
+        if self._should_use_live_for_current_target():
+            self._recording_live_active = True
             self._start_live_session(self._transcription_seq)
         else:
             with self._live_state_lock:
                 self._live_session = None
         self._play_start_sound()
-        self._status_item.title = "Live-Aufnahme läuft…" if self._live_transcription else "Aufnahme läuft…"
+        self._status_item.title = "Live-Aufnahme läuft…" if self._recording_live_active else "Aufnahme läuft…"
         self.recorder.start()
         self.overlay.show(lambda: self.recorder.current_level)
 
@@ -1184,6 +1200,7 @@ class WhisperMacApp(rumps.App):
         use_live_mode = self._session_uses_live(my_seq)
         audio  = self.recorder.stop()
         self._is_recording = False
+        self._recording_live_active = False
 
         if audio is None or len(audio) < int(AudioRecorder.SAMPLE_RATE * 0.3):
             if use_live_mode:
