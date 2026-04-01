@@ -47,6 +47,7 @@ from Quartz import (
     kCGEventFlagMaskCommand,
     kCGEventFlagMaskControl,
     kCGEventFlagMaskSecondaryFn,
+    kCGEventFlagMaskShift,
     kCGEventKeyDown,
     kCGEventKeyUp,
     kCGEventLeftMouseDown,
@@ -864,86 +865,35 @@ class WhisperMacApp(rumps.App):
         return self._paste_plain_text(new_tail, pb)
 
     def _replace_recent_text(self, old_text: str, new_text: str) -> bool:
-        old_len = self._ax_text_length(old_text)
         if self._is_terminal_target():
+            old_len = self._ax_text_length(old_text)
             return self._replace_recent_text_terminal(old_len, new_text)
 
-        if old_len <= 0:
-            if not new_text:
-                return True
-            if self._insert_plain_text(new_text):
-                return True
-            pb = AppKit.NSPasteboard.generalPasteboard()
-            return self._paste_plain_text(new_text, pb)
-
+        # Gemeinsamen Präfix bestimmen – nur das geänderte Ende ersetzen
         common_prefix = self._common_prefix_text(old_text, new_text)
-        prefix_len = self._ax_text_length(common_prefix)
         old_tail = old_text[len(common_prefix):]
         new_tail = new_text[len(common_prefix):]
         old_tail_len = self._ax_text_length(old_tail)
 
-        if old_tail_len <= 0:
+        pb = AppKit.NSPasteboard.generalPasteboard()
+
+        if old_tail_len == 0:
+            # Nur anhängen – direkt einfügen
             if not new_tail:
                 return True
-            if self._insert_plain_text(new_tail):
-                return True
-            pb = AppKit.NSPasteboard.generalPasteboard()
             return self._paste_plain_text(new_tail, pb)
 
-        try:
-            from ApplicationServices import (
-                AXUIElementCreateSystemWide,
-                AXUIElementCopyAttributeValue,
-                AXUIElementSetAttributeValue,
-                AXValueCreate,
-                kAXValueCFRangeType,
-            )
-            from Quartz import CFRangeMake
-
-            system = AXUIElementCreateSystemWide()
-            err, focused = AXUIElementCopyAttributeValue(system, "AXFocusedUIElement", None)
-            if err == 0 and focused is not None:
-                err, sel_range = AXUIElementCopyAttributeValue(focused, "AXSelectedTextRange", None)
-                if err == 0 and sel_range is not None:
-                    match = re.search(r"location:(\d+)", str(sel_range))
-                    if match:
-                        cursor_loc = int(match.group(1))
-                        start = max(0, cursor_loc - old_len + prefix_len)
-                        range_value = AXValueCreate(kAXValueCFRangeType, CFRangeMake(start, old_tail_len))
-                        err = AXUIElementSetAttributeValue(focused, "AXSelectedTextRange", range_value)
-                        if err == 0:
-                            err = AXUIElementSetAttributeValue(
-                                focused,
-                                "AXSelectedText",
-                                AppKit.NSString.stringWithString_(new_tail),
-                            )
-                            if err == 0:
-                                logging.debug(
-                                    "AX replace ok prefix_len=%s old_tail_len=%s new_tail_len=%s",
-                                    prefix_len,
-                                    old_tail_len,
-                                    self._ax_text_length(new_tail),
-                                )
-                                return True
-        except Exception as e:
-            logging.debug(f"AX replace exception: {e}")
-
-        logging.debug(
-            "AX replace failed, fallback via backspace prefix_len=%s old_tail_len=%s new_tail_len=%s",
-            prefix_len,
-            old_tail_len,
-            self._ax_text_length(new_tail),
-        )
+        # Alten Tail per Shift+← selektieren (von Cursor rückwärts)
+        # und dann durch neuen Tail ersetzen.
+        # Vorteil gegenüber Backspace: die Selektion ersetzt chirurgisch nur
+        # den geänderten Teil, ohne den gemeinsamen Präfix zu berühren.
         for _ in range(old_tail_len):
-            down = CGEventCreateKeyboardEvent(None, 51, True)
-            CGEventPost(kCGHIDEventTap, down)
-            up = CGEventCreateKeyboardEvent(None, 51, False)
-            CGEventPost(kCGHIDEventTap, up)
+            self._post_key(123, kCGEventFlagMaskShift)  # Shift+←
+
         if not new_tail:
+            self._post_key(51)  # Backspace löscht die Selektion
             return True
-        if self._insert_plain_text(new_tail):
-            return True
-        pb = AppKit.NSPasteboard.generalPasteboard()
+
         return self._paste_plain_text(new_tail, pb)
 
     def _update_insert_tracking(self, text: str):
