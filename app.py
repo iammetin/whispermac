@@ -342,6 +342,14 @@ class WhisperMacApp(rumps.App):
         self._mic_submenu["System (Standard)"] = default_item
         self._mic_menu_items["System (Standard)"] = (None, default_item)
 
+        # PortAudio-Cache leeren damit beim Start bereits angeschlossene
+        # Kopfhörer / BT-Geräte sofort erkannt werden (wie in _refresh_mic_menu)
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            pass
+
         for idx, name in _list_input_devices():
             item = rumps.MenuItem(name, callback=self._on_mic_select)
             self._mic_submenu[name] = item
@@ -539,9 +547,9 @@ class WhisperMacApp(rumps.App):
 
     _LIVE_TRANSCRIBE_INTERVAL = 0.18
     _LIVE_MIN_AUDIO_SECONDS   = 0.25
-    _LIVE_FLUSH_GUARD_WORDS   = 1
+    _LIVE_FLUSH_GUARD_WORDS   = 0
     _LIVE_MIN_FLUSH_WORDS     = 1
-    _LIVE_FIRST_PASS_GUARD_WORDS = 1
+    _LIVE_FIRST_PASS_GUARD_WORDS = 0
     _LIVE_LLM_MIN_WORDS       = 8
 
     def _clear_mlx_cache(self):
@@ -620,15 +628,27 @@ class WhisperMacApp(rumps.App):
         combined = re.sub(r"\s+([,.;:!?])", r"\1", combined)
         return re.sub(r"\s{2,}", " ", combined).strip()
 
+    def _current_insert_context(self) -> tuple[bool, bool]:
+        char_before = self._get_char_before_cursor()
+        if char_before:
+            needs_leading_space = char_before not in (" ", "\n", "\t", "\r")
+            after_sentence_end = char_before in (".", "!", "?")
+        else:
+            needs_leading_space = self._last_insert_ends_with_word
+            after_sentence_end = self._last_insert_ends_with_sentence
+        return needs_leading_space, after_sentence_end
+
     def _start_live_session(self, seq: int):
+        needs_leading_space, after_sentence_end = self._current_insert_context()
         with self._live_state_lock:
             self._live_session = {
                 "seq": seq,
                 "passes": 0,
                 "prev_words": [],
-                "committed_words": [],
-                "pending_words": [],
-                "inserted_chunks": [],
+                "displayed_text": "",
+                "history_text": "",
+                "needs_leading_space": needs_leading_space,
+                "after_sentence_end": after_sentence_end,
             }
         threading.Thread(target=self._live_transcribe_loop, args=(seq,), daemon=True).start()
 
@@ -665,80 +685,134 @@ class WhisperMacApp(rumps.App):
                         return
                     state["passes"] += 1
                     passes = state["passes"]
-                    committed_len = len(state["committed_words"])
-                    if state["prev_words"]:
-                        stable_len = self._common_prefix_len(state["prev_words"], words)
-                    else:
-                        stable_len = max(0, len(words) - self._LIVE_FIRST_PASS_GUARD_WORDS)
-                    if stable_len < committed_len:
-                        logging.debug(
-                            "Live-Stabilitaet hinter committed_words: committed=%s stable=%s words=%s",
-                            committed_len,
-                            stable_len,
-                            words,
-                        )
-                        stable_len = committed_len
-                    state["pending_words"] = words[committed_len:stable_len]
+                    guard_words = self._LIVE_FIRST_PASS_GUARD_WORDS if passes <= 1 else self._LIVE_FLUSH_GUARD_WORDS
+                    display_len = max(0, len(words) - guard_words)
+                    raw_display_text = self._join_words(words[:display_len])
                     state["prev_words"] = words
-                self._flush_live_pending(seq, final=False)
+                self._sync_live_text(seq, raw_display_text, final=False)
             except Exception as e:
                 logging.exception(f"Live-Transkription fehlgeschlagen: {e}")
             finally:
                 self._transcribe_lock.release()
 
-    def _flush_live_pending(self, seq: int, final: bool):
-        with self._live_state_lock:
-            state = self._live_session
-            if state is None or state["seq"] != seq:
-                return
-            pending = state["pending_words"]
-            passes = state["passes"]
-            if not pending:
-                return
-            if final:
-                flush_count = len(pending)
-            elif passes <= 1:
-                return
-            else:
-                flush_count = len(pending) - self._LIVE_FLUSH_GUARD_WORDS
-                if flush_count < self._LIVE_MIN_FLUSH_WORDS:
-                    return
-            raw_words = pending[:flush_count]
+    def _apply_live_context(self, text: str, needs_leading_space: bool, after_sentence_end: bool) -> str:
+        if not text:
+            return ""
+        text = apply_shortcuts(text, load_shortcuts())
+        if needs_leading_space:
+            text = " " + text
+        stripped = text.lstrip()
+        if after_sentence_end and stripped and stripped[0].islower():
+            text = text[: len(text) - len(stripped)] + stripped[0].upper() + stripped[1:]
+        return text
 
-        raw_text = self._join_words(raw_words)
-        prepared = self._prepare_output_text(raw_text, final=final)
-        if not prepared:
-            with self._live_state_lock:
-                state = self._live_session
-                if state is not None and state["seq"] == seq:
-                    del state["pending_words"][:flush_count]
-                    state["committed_words"].extend(raw_words)
-            return
-        if not self._insert_with_workflows(prepared):
-            logging.warning("Live-Einfügen fehlgeschlagen, behalte Pending-Chunk bis zur Finalisierung")
-            return
-        with self._live_state_lock:
-            state = self._live_session
-            if state is not None and state["seq"] == seq:
-                del state["pending_words"][:flush_count]
-                state["committed_words"].extend(raw_words)
-                state["inserted_chunks"].append(prepared)
+    def _ax_text_length(self, text: str) -> int:
+        return int(AppKit.NSString.stringWithString_(text or "").length())
 
-    def _finalize_live_session(self, seq: int, final_text: str) -> str:
-        words = self._split_words(final_text)
+    def _replace_recent_text(self, old_text: str, new_text: str) -> bool:
+        old_len = self._ax_text_length(old_text)
+        if old_len <= 0:
+            if not new_text:
+                return True
+            if self._insert_plain_text(new_text):
+                return True
+            pb = AppKit.NSPasteboard.generalPasteboard()
+            return self._paste_plain_text(new_text, pb)
+
+        try:
+            from ApplicationServices import (
+                AXUIElementCreateSystemWide,
+                AXUIElementCopyAttributeValue,
+                AXUIElementSetAttributeValue,
+                AXValueCreate,
+                kAXValueCFRangeType,
+            )
+            from Quartz import CFRangeMake
+
+            system = AXUIElementCreateSystemWide()
+            err, focused = AXUIElementCopyAttributeValue(system, "AXFocusedUIElement", None)
+            if err == 0 and focused is not None:
+                err, sel_range = AXUIElementCopyAttributeValue(focused, "AXSelectedTextRange", None)
+                if err == 0 and sel_range is not None:
+                    match = re.search(r"location:(\d+)", str(sel_range))
+                    if match:
+                        cursor_loc = int(match.group(1))
+                        start = max(0, cursor_loc - old_len)
+                        range_value = AXValueCreate(kAXValueCFRangeType, CFRangeMake(start, old_len))
+                        err = AXUIElementSetAttributeValue(focused, "AXSelectedTextRange", range_value)
+                        if err == 0:
+                            err = AXUIElementSetAttributeValue(
+                                focused,
+                                "AXSelectedText",
+                                AppKit.NSString.stringWithString_(new_text),
+                            )
+                            if err == 0:
+                                logging.debug(
+                                    "AX replace ok old_len=%s new_len=%s",
+                                    old_len,
+                                    self._ax_text_length(new_text),
+                                )
+                                return True
+        except Exception as e:
+            logging.debug(f"AX replace exception: {e}")
+
+        logging.debug("AX replace failed, fallback via backspace")
+        for _ in range(old_len):
+            down = CGEventCreateKeyboardEvent(None, 51, True)
+            CGEventPost(kCGHIDEventTap, down)
+            up = CGEventCreateKeyboardEvent(None, 51, False)
+            CGEventPost(kCGHIDEventTap, up)
+        if not new_text:
+            return True
+        if self._insert_plain_text(new_text):
+            return True
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        return self._paste_plain_text(new_text, pb)
+
+    def _update_insert_tracking(self, text: str):
+        if not text:
+            return
+        self._last_insert_ends_with_word = text[-1] not in (" ", "\n", "\t", "\r")
+        self._last_insert_ends_with_sentence = text[-1] in (".", "!", "?")
+
+    def _sync_live_text(self, seq: int, raw_text: str, final: bool):
         with self._live_state_lock:
             state = self._live_session
             if state is None or state["seq"] != seq:
                 return ""
-            committed_len = len(state["committed_words"])
-            state["pending_words"] = words[committed_len:] if committed_len < len(words) else []
-        self._flush_live_pending(seq, final=True)
+            old_displayed = state["displayed_text"]
+            needs_leading_space = state["needs_leading_space"]
+            after_sentence_end = state["after_sentence_end"]
+
+        prepared = self._prepare_output_text(raw_text, final=final)
+        display_text = self._apply_live_context(prepared, needs_leading_space, after_sentence_end)
+        history_text = display_text.lstrip()
+        if display_text == old_displayed:
+            with self._live_state_lock:
+                state = self._live_session
+                if state is not None and state["seq"] == seq:
+                    state["history_text"] = history_text
+            return history_text
+        if not self._replace_recent_text(old_displayed, display_text):
+            logging.warning("Live-Ersetzen fehlgeschlagen, behalte bisherigen Anzeige-Text")
+            return old_displayed.lstrip()
+        self._update_insert_tracking(display_text)
         with self._live_state_lock:
             state = self._live_session
-            history_text = self._history_text_from_chunks(state["inserted_chunks"]) if state else ""
             if state is not None and state["seq"] == seq:
-                self._live_session = None
+                state["displayed_text"] = display_text
+                state["history_text"] = history_text
         return history_text
+
+    def _finalize_live_session(self, seq: int, final_text: str) -> str:
+        history_text = self._sync_live_text(seq, final_text, final=True)
+        with self._live_state_lock:
+            state = self._live_session
+            if state is None or state["seq"] != seq:
+                return history_text or ""
+            history_text = state["history_text"] or history_text
+            self._live_session = None
+        return history_text or ""
 
     # ── fn-Taste abfangen ─────────────────────────────────────────────────
 
