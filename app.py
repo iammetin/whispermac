@@ -26,6 +26,7 @@ logging.info(f"sys.frozen: {getattr(sys, 'frozen', False)}")
 
 import AppKit
 import rumps
+import signal
 logging.info("AppKit + rumps importiert")
 from CoreFoundation import CFRunLoopGetMain
 from Quartz import (
@@ -247,6 +248,12 @@ class _AppMenuDelegate(AppKit.NSObject):
             self._app._refresh_mic_menu()
 
 
+class _AppTerminationObserver(AppKit.NSObject):
+    def applicationWillTerminate_(self, notification):
+        if hasattr(self, "_app"):
+            self._app._cleanup_before_exit("NSApplicationWillTerminate")
+
+
 class WhisperMacApp(rumps.App):
 
     def __init__(self):
@@ -256,7 +263,7 @@ class WhisperMacApp(rumps.App):
         self._setup_edit_menu()
 
         self.recorder    = AudioRecorder()
-        self.transcriber = Transcriber(MODEL_PATH, WHISPER_SERVER_BIN, use_gpu=True)
+        self.transcriber = Transcriber(MODEL_PATH, WHISPER_SERVER_BIN, use_gpu=True, threads=8)
         self.corrector   = TextCorrector(CORRECTOR_PATH)
         self.overlay     = RecordingOverlay()
         self._spinner    = _TranscriptionSpinner()
@@ -289,6 +296,8 @@ class WhisperMacApp(rumps.App):
         self._transcription_seq  = 0   # Jeder fn-Druck erhöht diesen Zähler
         self._live_state_lock = threading.Lock()
         self._live_session    = None
+        self._cleanup_lock    = threading.Lock()
+        self._did_cleanup     = False
         self._shortcuts_win    = ShortcutsWindowController.alloc().init()
         self._workflows_win    = WorkflowsWindowController.alloc().init()
         self._ki_live_win      = PromptManagerWindowController.alloc().initWithMode_("live")
@@ -354,13 +363,23 @@ class WhisperMacApp(rumps.App):
                      rumps.MenuItem("Kürzel…  (F15)",         callback=self._on_shortcuts),
                      rumps.MenuItem("Workflows…  (F15 F15)", callback=self._on_workflows),
                      None,
-                     rumps.MenuItem("Beenden", callback=rumps.quit_application)])
+                     rumps.MenuItem("Beenden", callback=self._on_quit)])
         self.menu = menu
 
         # Delegate auf das Hauptmenü – feuert beim Öffnen des Statusleisten-Menüs
         self._menu_delegate = _AppMenuDelegate.alloc().init()
         self._menu_delegate._app = self
         self._menu._menu.setDelegate_(self._menu_delegate)
+
+        self._termination_observer = _AppTerminationObserver.alloc().init()
+        self._termination_observer._app = self
+        AppKit.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self._termination_observer,
+            "applicationWillTerminate:",
+            AppKit.NSApplicationWillTerminateNotification,
+            None,
+        )
+        self._install_signal_handlers()
 
         # Verlauf initial ausblenden
         self._hist_header._menuitem.setHidden_(True)
@@ -458,6 +477,53 @@ class WhisperMacApp(rumps.App):
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show_ready)
         threading.Timer(3.0, lambda: AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_hide_ready)).start()
 
+    def _install_signal_handlers(self):
+        def _handle_signal(signum, frame):
+            logging.info(f"Signal empfangen: {signum}")
+            self._cleanup_before_exit(f"signal {signum}")
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: AppKit.NSApplication.sharedApplication().terminate_(None)
+            )
+
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            try:
+                signal.signal(signum, _handle_signal)
+            except Exception:
+                pass
+
+    def _cleanup_before_exit(self, reason: str):
+        with self._cleanup_lock:
+            if self._did_cleanup:
+                return
+            self._did_cleanup = True
+
+        logging.info(f"Cleanup vor App-Ende: {reason}")
+        self._is_recording = False
+        try:
+            self.overlay.hide()
+        except Exception:
+            pass
+        try:
+            self.recorder.stop()
+        except Exception:
+            pass
+        try:
+            self.transcriber.close()
+        except Exception as e:
+            logging.exception(f"whisper.cpp Cleanup fehlgeschlagen: {e}")
+        try:
+            sd.stop()
+        except Exception:
+            pass
+        try:
+            sd._terminate()
+        except Exception:
+            pass
+
+    def _on_quit(self, sender):
+        self._cleanup_before_exit("menu quit")
+        AppKit.NSApplication.sharedApplication().terminate_(None)
+
     # ── UI-Update (thread-safe) ───────────────────────────────────────────
 
     def _ready_status(self) -> str:
@@ -471,11 +537,12 @@ class WhisperMacApp(rumps.App):
                 self._status_item.title = status
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_update)
 
-    _LIVE_TRANSCRIBE_INTERVAL = 0.35
-    _LIVE_MIN_AUDIO_SECONDS   = 0.45
-    _LIVE_FLUSH_GUARD_WORDS   = 1
+    _LIVE_TRANSCRIBE_INTERVAL = 0.18
+    _LIVE_MIN_AUDIO_SECONDS   = 0.25
+    _LIVE_FLUSH_GUARD_WORDS   = 0
     _LIVE_MIN_FLUSH_WORDS     = 1
-    _LIVE_FIRST_PASS_GUARD_WORDS = 1
+    _LIVE_FIRST_PASS_GUARD_WORDS = 0
+    _LIVE_LLM_MIN_WORDS       = 8
 
     def _clear_mlx_cache(self):
         try:
@@ -498,6 +565,12 @@ class WhisperMacApp(rumps.App):
             count += 1
         return count
 
+    def _basic_live_cleanup(self, text: str) -> str:
+        text = re.sub(r"\b(?:äh+|ähm+|hm+|hmm+|mmm+)\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+        text = re.sub(r"\s{2,}", " ", text)
+        return text.strip(" \t\r\n,")
+
     def _transcribe_audio(self, audio, retry_lowercase: bool = True, live_pass: bool = False) -> str:
         text = self.transcriber.transcribe(audio, language=self.language)
         if retry_lowercase:
@@ -514,8 +587,17 @@ class WhisperMacApp(rumps.App):
         text = (text or "").strip()
         if not text or self._is_hallucination(text):
             return ""
+        if not final:
+            text = self._basic_live_cleanup(text)
+            if not text or self._is_hallucination(text):
+                return ""
         word_count = len(self._split_words(text))
-        if self._ki_korrektur and (final or word_count >= 3):
+        should_run_llm = final or (
+            self._ki_korrektur
+            and word_count >= self._LIVE_LLM_MIN_WORDS
+            and text[-1:] in ".!?"
+        )
+        if self._ki_korrektur and should_run_llm:
             text = self.corrector.correct(
                 text,
                 max_tokens=16000 if final else 128,
@@ -617,17 +699,24 @@ class WhisperMacApp(rumps.App):
                 if flush_count < self._LIVE_MIN_FLUSH_WORDS:
                     return
             raw_words = pending[:flush_count]
-            del pending[:flush_count]
-            state["committed_words"].extend(raw_words)
 
         raw_text = self._join_words(raw_words)
         prepared = self._prepare_output_text(raw_text, final=final)
         if not prepared:
+            with self._live_state_lock:
+                state = self._live_session
+                if state is not None and state["seq"] == seq:
+                    del state["pending_words"][:flush_count]
+                    state["committed_words"].extend(raw_words)
             return
-        self._insert_with_workflows(prepared)
+        if not self._insert_with_workflows(prepared):
+            logging.warning("Live-Einfügen fehlgeschlagen, behalte Pending-Chunk bis zur Finalisierung")
+            return
         with self._live_state_lock:
             state = self._live_session
             if state is not None and state["seq"] == seq:
+                del state["pending_words"][:flush_count]
+                state["committed_words"].extend(raw_words)
                 state["inserted_chunks"].append(prepared)
 
     def _finalize_live_session(self, seq: int, final_text: str) -> str:
@@ -918,7 +1007,48 @@ class WhisperMacApp(rumps.App):
             logging.debug(f"_get_char_before_cursor exception: {e}")
             return ""
 
-    def _insert_with_workflows(self, text: str):
+    def _insert_plain_text(self, text: str) -> bool:
+        try:
+            from ApplicationServices import (
+                AXUIElementCreateSystemWide,
+                AXUIElementCopyAttributeValue,
+                AXUIElementSetAttributeValue,
+            )
+
+            system = AXUIElementCreateSystemWide()
+            err, focused = AXUIElementCopyAttributeValue(system, "AXFocusedUIElement", None)
+            if err != 0 or focused is None:
+                logging.debug(f"AX insert skipped: focused err={err}")
+                return False
+
+            err = AXUIElementSetAttributeValue(
+                focused,
+                "AXSelectedText",
+                AppKit.NSString.stringWithString_(text),
+            )
+            if err == 0:
+                logging.debug(f"AX insert ok len={len(text)}")
+                return True
+            logging.debug(f"AX insert failed err={err}")
+        except Exception as e:
+            logging.debug(f"AX insert exception: {e}")
+        return False
+
+    def _paste_plain_text(self, text: str, pb) -> bool:
+        try:
+            pb.clearContents()
+            pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+            time.sleep(0.05)
+            subprocess.run([
+                "osascript", "-e",
+                'tell application "System Events" to keystroke "v" using command down',
+            ])
+            return True
+        except Exception as e:
+            logging.exception(f"Paste fehlgeschlagen: {e}")
+            return False
+
+    def _insert_with_workflows(self, text: str) -> bool:
         # Workflows zuerst auf Original-Text (verhindert rstrip-Konflikt mit Kürzeln)
         workflows = load_workflows()
         segments  = split_by_triggers(text, workflows)
@@ -926,6 +1056,7 @@ class WhisperMacApp(rumps.App):
 
         pb      = AppKit.NSPasteboard.generalPasteboard()
         saved   = pb.stringForType_(AppKit.NSPasteboardTypeString)
+        inserted_any = False
 
         # Smartes Leerzeichen + Großschreibung: vor dem ersten Segment prüfen
         # was direkt vor dem Cursor steht. Fallback für iFrames/Browser.
@@ -961,16 +1092,17 @@ class WhisperMacApp(rumps.App):
                 # Text in HTML-Wrapper einfügen – alles als ein einziger Paste
                 pre, post = pending_wrap
                 paste_html(pre + seg_text + post)
+                inserted_any = True
                 last_seg     = seg_text
                 pending_wrap = None
             elif seg_text:
-                pb.clearContents()
-                pb.setString_forType_(seg_text, AppKit.NSPasteboardTypeString)
-                time.sleep(0.05)
-                subprocess.run([
-                    "osascript", "-e",
-                    'tell application "System Events" to keystroke "v" using command down',
-                ])
+                if self._insert_plain_text(seg_text):
+                    inserted_any = True
+                elif self._paste_plain_text(seg_text, pb):
+                    inserted_any = True
+                else:
+                    logging.warning("Segment konnte weder per AX noch per Paste eingefügt werden")
+                    return False
                 last_seg = seg_text
 
             if pending_after:
@@ -998,6 +1130,7 @@ class WhisperMacApp(rumps.App):
             # Trigger am Ende ohne Folgetext → leeres HTML einfügen
             pre, post = pending_wrap
             paste_html(pre + post)
+            inserted_any = True
         if pending_after:
             time.sleep(0.08)
             execute_action(pending_after)
@@ -1012,6 +1145,8 @@ class WhisperMacApp(rumps.App):
                 pb.clearContents()
                 pb.setString_forType_(s, AppKit.NSPasteboardTypeString)
             threading.Thread(target=_restore_clipboard, daemon=True).start()
+
+        return inserted_any or not text.strip()
 
     def _insert_text(self, text: str):
         pb = AppKit.NSPasteboard.generalPasteboard()

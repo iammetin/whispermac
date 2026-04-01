@@ -2,6 +2,7 @@ import atexit
 import json
 import logging
 import os
+import signal
 import socket
 import subprocess
 import tempfile
@@ -19,11 +20,20 @@ class Transcriber:
     _READY_TIMEOUT = 90.0
     _HEALTH_INTERVAL = 0.25
 
-    def __init__(self, model_path: str, server_bin: str, host: str = "127.0.0.1", use_gpu: bool = False):
+    def __init__(
+        self,
+        model_path: str,
+        server_bin: str,
+        host: str = "127.0.0.1",
+        use_gpu: bool = False,
+        threads: int | None = None,
+    ):
         self.model_path = os.path.abspath(model_path)
         self.server_bin = os.path.abspath(server_bin)
         self.host = host
         self.use_gpu = use_gpu
+        cpu_count = os.cpu_count() or 8
+        self.threads = max(4, min(cpu_count, threads or 8))
 
         self._model_loaded = False
         self._port = None
@@ -43,12 +53,15 @@ class Transcriber:
         self._port = None
         if proc is None or proc.poll() is not None:
             return
+        logging.info(f"Beende whisper.cpp Server pid={proc.pid}")
         proc.terminate()
         try:
             proc.wait(timeout=4)
         except subprocess.TimeoutExpired:
+            logging.warning(f"whisper.cpp Server pid={proc.pid} reagiert nicht auf SIGTERM, sende SIGKILL")
             proc.kill()
             proc.wait(timeout=4)
+        logging.info(f"whisper.cpp Server pid={proc.pid} beendet")
 
     def transcribe(self, audio: np.ndarray, language: str = None, task: str = "transcribe") -> str:
         self._ensure_server()
@@ -111,6 +124,7 @@ class Transcriber:
             if not os.path.isfile(self.model_path):
                 raise FileNotFoundError(f"whisper.cpp Modell nicht gefunden: {self.model_path}")
 
+            self._cleanup_stale_servers()
             errors = []
             attempts = [True, False] if self.use_gpu else [False]
 
@@ -121,6 +135,9 @@ class Transcriber:
                     self.server_bin,
                     "--host", self.host,
                     "--port", str(self._port),
+                    "-t", str(self.threads),
+                    "-bo", "1",
+                    "-nf",
                     "-m", self.model_path,
                     "-l", "auto",
                 ]
@@ -153,6 +170,54 @@ class Transcriber:
                     self.close()
 
             raise RuntimeError(" | ".join(errors))
+
+    def _cleanup_stale_servers(self):
+        try:
+            output = subprocess.check_output(
+                ["ps", "-axo", "pid=,command="],
+                text=True,
+            )
+        except Exception as e:
+            logging.warning(f"Konnte laufende Prozesse nicht prüfen: {e}")
+            return
+
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            pid_str, _, cmd = line.partition(" ")
+            if not pid_str.isdigit():
+                continue
+            pid = int(pid_str)
+            if pid <= 0 or pid == os.getpid():
+                continue
+            if self.server_bin not in cmd or self.model_path not in cmd:
+                continue
+
+            logging.warning(f"Beende verwaisten whisper.cpp Server pid={pid}")
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except Exception as e:
+                logging.warning(f"Konnte whisper.cpp Server pid={pid} nicht terminieren: {e}")
+                continue
+
+            deadline = time.time() + 4.0
+            while time.time() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                try:
+                    logging.warning(f"whisper.cpp Server pid={pid} lebt noch, sende SIGKILL")
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except Exception as e:
+                    logging.warning(f"Konnte whisper.cpp Server pid={pid} nicht killen: {e}")
 
     def _log_server_output(self):
         proc = self._server_proc
