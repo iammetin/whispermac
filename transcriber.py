@@ -109,10 +109,7 @@ class Transcriber:
             except OSError:
                 pass
 
-        text = (data.get("text") or "").strip()
-        if text.endswith("."):
-            text = text[:-1].rstrip()
-        return text
+        return (data.get("text") or "").strip()
 
     def _ensure_server(self):
         with self._server_lock:
