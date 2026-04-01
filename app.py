@@ -1220,11 +1220,15 @@ class WhisperMacApp(rumps.App):
         try:
             pb.clearContents()
             pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
-            time.sleep(0.05)
-            subprocess.run([
-                "osascript", "-e",
-                'tell application "System Events" to keystroke "v" using command down',
-            ])
+            time.sleep(0.02)
+            # Cmd+V direkt via CGEvent – gleiche HID-Pipeline wie alle anderen Key-Events.
+            # Funktioniert zuverlässig in iFrames und Browser-Editoren, wo osascript versagt.
+            down = CGEventCreateKeyboardEvent(None, 9, True)   # V
+            CGEventSetFlags(down, kCGEventFlagMaskCommand)
+            CGEventPost(kCGHIDEventTap, down)
+            up = CGEventCreateKeyboardEvent(None, 9, False)
+            CGEventSetFlags(up, kCGEventFlagMaskCommand)
+            CGEventPost(kCGHIDEventTap, up)
             return True
         except Exception as e:
             logging.exception(f"Paste fehlgeschlagen: {e}")
@@ -1337,11 +1341,13 @@ class WhisperMacApp(rumps.App):
         pb.clearContents()
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
 
-        time.sleep(0.05)
-        subprocess.run([
-            "osascript", "-e",
-            'tell application "System Events" to keystroke "v" using command down',
-        ])
+        time.sleep(0.02)
+        down = CGEventCreateKeyboardEvent(None, 9, True)   # Cmd+V
+        CGEventSetFlags(down, kCGEventFlagMaskCommand)
+        CGEventPost(kCGHIDEventTap, down)
+        up = CGEventCreateKeyboardEvent(None, 9, False)
+        CGEventSetFlags(up, kCGEventFlagMaskCommand)
+        CGEventPost(kCGHIDEventTap, up)
 
         if old_text:
             time.sleep(0.35)
