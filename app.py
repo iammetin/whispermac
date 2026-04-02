@@ -760,6 +760,14 @@ class WhisperMacApp(rumps.App):
 
     def _start_live_session(self, seq: int):
         needs_leading_space, after_sentence_end = self._current_insert_context()
+        defer_live_insert = self._should_defer_live_insert_for_current_target()
+        if defer_live_insert:
+            bundle_id, name = self._frontmost_app_identity()
+            logging.info(
+                "Live-Transkription läuft intern; Live-Einfügen für diese Session unterdrückt: bundle=%s name=%s",
+                bundle_id or "-",
+                name or "-",
+            )
         with self._live_state_lock:
             self._live_session = {
                 "seq": seq,
@@ -770,6 +778,7 @@ class WhisperMacApp(rumps.App):
                 "history_text": "",
                 "needs_leading_space": needs_leading_space,
                 "after_sentence_end": after_sentence_end,
+                "defer_live_insert": defer_live_insert,
             }
         threading.Thread(target=self._live_transcribe_loop, args=(seq,), daemon=True).start()
 
@@ -862,17 +871,10 @@ class WhisperMacApp(rumps.App):
         return is_terminal
 
     def _should_use_live_for_current_target(self) -> bool:
-        if not self._live_transcription:
-            return False
-        if self._is_terminal_target():
-            bundle_id, name = self._frontmost_app_identity()
-            logging.info(
-                "Live-Transkription für diese Session automatisch deaktiviert: bundle=%s name=%s",
-                bundle_id or "-",
-                name or "-",
-            )
-            return False
-        return True
+        return self._live_transcription
+
+    def _should_defer_live_insert_for_current_target(self) -> bool:
+        return self._live_transcription and self._is_terminal_target()
 
     def _post_key(self, keycode: int, flags: int = 0):
         down = CGEventCreateKeyboardEvent(None, keycode, True)
@@ -944,6 +946,7 @@ class WhisperMacApp(rumps.App):
             old_displayed = state["displayed_text"]
             needs_leading_space = state["needs_leading_space"]
             after_sentence_end = state["after_sentence_end"]
+            defer_live_insert = state.get("defer_live_insert", False)
             prev_words = state["prev_words"]
             frozen_words = state["frozen_words"]
 
@@ -968,6 +971,12 @@ class WhisperMacApp(rumps.App):
         prepared = self._prepare_output_text(raw_text, final=final)
         display_text = self._apply_live_context(prepared, needs_leading_space, after_sentence_end)
         history_text = display_text.lstrip()
+        if defer_live_insert and not final:
+            with self._live_state_lock:
+                state = self._live_session
+                if state is not None and state["seq"] == seq:
+                    state["history_text"] = history_text
+            return history_text
         if display_text == old_displayed:
             with self._live_state_lock:
                 state = self._live_session
