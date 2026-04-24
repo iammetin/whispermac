@@ -61,6 +61,7 @@ from Quartz import (
 kCGDirectMainDisplay = 0
 
 F9_KEYCODE  = 101
+F10_KEYCODE = 109
 F13_KEYCODE = 105
 F14_KEYCODE = 107
 F15_KEYCODE = 113
@@ -357,6 +358,7 @@ class WhisperMacApp(rumps.App):
         self._last_insert_ends_with_word     = False  # Fallback für iFrames/Browser
         self._last_insert_ends_with_sentence = False  # Fallback: endet mit . ! ?
         self._f9_is_down         = False
+        self._f10_is_down        = False
         self._f13_is_down        = False
         self._f13_hold_timer     = None
         self._f13_hold_triggered = False
@@ -1038,6 +1040,13 @@ class WhisperMacApp(rumps.App):
                             self._f9_is_down = True
                             self._on_fn_press()
                         return None
+                    if kc == F10_KEYCODE:
+                        if not self._f10_is_down:
+                            self._f10_is_down        = True
+                            self._f13_hold_triggered = False
+                            self._f13_hold_timer = threading.Timer(0.4, self._on_f13_hold)
+                            self._f13_hold_timer.start()
+                        return None
                     if kc == F13_KEYCODE:
                         if not self._f13_is_down:
                             self._f13_is_down        = True
@@ -1100,6 +1109,14 @@ class WhisperMacApp(rumps.App):
                             # Tap: Aufnahme wegwerfen, Standard-Prompt
                             self.recorder.stop()
                             threading.Thread(target=self._on_f14_ai_edit, daemon=True).start()
+                        return None
+                    if kc == F10_KEYCODE:
+                        self._f10_is_down = False
+                        if self._f13_hold_timer:
+                            self._f13_hold_timer.cancel()
+                            self._f13_hold_timer = None
+                        if not self._f13_hold_triggered:
+                            self._delete_last_word()
                         return None
                     if kc == F13_KEYCODE:
                         self._f13_is_down = False
