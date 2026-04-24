@@ -412,12 +412,13 @@ class WhisperMacApp(rumps.App):
 
         self._live_item = rumps.MenuItem("Live-Transkription", callback=self._on_live_toggle)
 
-        # ── Mikrofon-Untermenü ────────────────────────────────────────────
-        self._mic_submenu    = rumps.MenuItem("Mikrofon")
+        # ── Mikrofon (inline im Hauptmenü) ───────────────────────────────
+        self._mic_header = rumps.MenuItem("Mikrofon:")
+        self._mic_header.set_callback(None)
         self._mic_menu_items = {}  # name -> (index, MenuItem)
         default_item = rumps.MenuItem("System (Standard)", callback=self._on_mic_select)
-        self._mic_submenu["System (Standard)"] = default_item
         self._mic_menu_items["System (Standard)"] = (None, default_item)
+        _initial_mic_items = [default_item]
 
         # PortAudio-Cache leeren damit beim Start bereits angeschlossene
         # Kopfhörer / BT-Geräte sofort erkannt werden (wie in _refresh_mic_menu)
@@ -429,10 +430,10 @@ class WhisperMacApp(rumps.App):
 
         for idx, name in _list_input_devices():
             item = rumps.MenuItem(name, callback=self._on_mic_select)
-            self._mic_submenu[name] = item
             self._mic_menu_items[name] = (idx, item)
             if name == self._mic_device_name:
                 self._mic_device_idx = idx
+            _initial_mic_items.append(item)
 
         # ── KI-Menü-Einträge ──────────────────────────────────────────────
         self._ki_item         = rumps.MenuItem("KI-Live-Korrektur",    callback=self._on_ki_live_toggle)
@@ -441,7 +442,9 @@ class WhisperMacApp(rumps.App):
         # ── Menü zusammenbauen ────────────────────────────────────────────
         menu = [self._status_item, None, self._hist_header]
         menu.extend(self._history_items)
-        menu.extend([None, self._mic_submenu, self._lang_submenu, self._translate_submenu,
+        menu.extend([None, self._mic_header])
+        menu.extend(_initial_mic_items)
+        menu.extend([None, self._lang_submenu, self._translate_submenu,
                      self._live_item,
                      self._ki_item,
                      self._ki_auswahl_item,
@@ -1729,6 +1732,7 @@ end tell"""])
 
     def _refresh_mic_menu(self):
         """Aktualisiert die Mikrofonliste (neue Geräte hinzufügen, verschwundene entfernen)."""
+        import collections as _co
         reinit_done = False
         if not self._is_recording:
             try:
@@ -1748,14 +1752,16 @@ end tell"""])
                     if self._mic_device_name == name:
                         self._mic_device_idx = idx
 
-        # Neue Geräte hinzufügen
+        # Neue Geräte hinzufügen – direkt hinter letztem bekannten Mic-Eintrag
         for name, idx in current.items():
             if name not in self._mic_menu_items:
                 item = rumps.MenuItem(name, callback=self._on_mic_select)
-                self._mic_submenu[name] = item
+                last_item = list(self._mic_menu_items.values())[-1][1]
+                pos = self.menu._menu.indexOfItem_(last_item._menuitem) + 1
+                self.menu._menu.insertItem_atIndex_(item._menuitem, pos)
+                _co.OrderedDict.__setitem__(self.menu, name, item)
                 self._mic_menu_items[name] = (idx, item)
                 if name == self._mic_device_name:
-                    # Alle anderen Häkchen entfernen, dann dieses setzen
                     for _, (_, it) in self._mic_menu_items.items():
                         it._menuitem.setState_(0)
                     item._menuitem.setState_(1)
@@ -1766,7 +1772,7 @@ end tell"""])
             if name == "System (Standard)":
                 continue
             if name not in current:
-                del self._mic_submenu[name]   # entfernt aus NSMenu UND rumps-internem Dict
+                del self.menu[name]
                 del self._mic_menu_items[name]
                 if self._mic_device_name == name:
                     self._mic_device_name = None
