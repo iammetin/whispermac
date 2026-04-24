@@ -706,7 +706,12 @@ class WhisperMacApp(rumps.App):
         return silence_samples / AudioRecorder.SAMPLE_RATE
 
     def _transcribe_audio(self, audio, retry_lowercase: bool = True, live_pass: bool = False) -> str:
-        text = self.transcriber.transcribe(audio, language=self.language)
+        # Live-Passes: einzelner Request, damit der Lock nicht zu lange gehalten wird.
+        # Finale Transkription: Chunking für beliebig lange Aufnahmen.
+        if live_pass:
+            text = self.transcriber.transcribe(audio, language=self.language)
+        else:
+            text = self.transcriber.transcribe_long(audio, language=self.language)
         if retry_lowercase:
             for retry in range(2):
                 if not (text and text == text.lower() and len(text.split()) >= 2):
@@ -1245,12 +1250,21 @@ class WhisperMacApp(rumps.App):
                 if use_live_mode:
                     self._clear_live_session(my_seq)
                 return
-            text = self._transcribe_audio(audio, retry_lowercase=True)
             if use_live_mode:
-                history_text = self._finalize_live_session(my_seq, text)
+                # Live hat bereits alles erfasst – letzte Wörter direkt finalisieren,
+                # kein erneuter Whisper-Durchlauf nötig.
+                with self._live_state_lock:
+                    state = self._live_session
+                    last_words = list(state["prev_words"]) if state else []
+                final_text = self._join_words(last_words)
+                if not final_text:
+                    # Fallback: Live-Session hatte keine Wörter → normal transkribieren
+                    final_text = self._transcribe_audio(audio, retry_lowercase=True)
+                history_text = self._finalize_live_session(my_seq, final_text)
                 if history_text:
                     self._add_to_history(history_text)
             else:
+                text = self._transcribe_audio(audio, retry_lowercase=True)
                 if text and not self._is_hallucination(text) and self._ki_korrektur:
                     self._set_ui(status="Korrigiere…")
                     text = self.corrector.correct(text)

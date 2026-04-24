@@ -63,9 +63,43 @@ class Transcriber:
             proc.wait(timeout=4)
         logging.info(f"whisper.cpp Server pid={proc.pid} beendet")
 
+    # Whisper wurde auf 30s-Segmente trainiert; 25s-Chunks geben genug Puffer.
+    _CHUNK_SAMPLES    = 16000 * 25
+    # Reste kürzer als 2s werden mit dem vorherigen Chunk zusammengeführt,
+    # damit kein winziger Clip entsteht der Whisper zur Halluzination verleitet.
+    _MIN_TAIL_SAMPLES = 16000 * 2
+
     def transcribe(self, audio: np.ndarray, language: str = None, task: str = "transcribe") -> str:
+        """Einzelner Request – für Live-Passes, bei denen Lock-Zeit kritisch ist.
+        whisper.cpp verwaltet >30s-Audio intern über ein Sliding Window."""
+        self._ensure_server()
+        return self._transcribe_chunk(audio, language, task)
+
+    def transcribe_long(self, audio: np.ndarray, language: str = None, task: str = "transcribe") -> str:
+        """Chunked-Variante für die finale Transkription langer Aufnahmen.
+        Kurze Reste (<2s) werden mit dem vorherigen Chunk zusammengeführt,
+        um Halluzinationen durch winzige Audio-Clips zu vermeiden."""
         self._ensure_server()
 
+        if len(audio) <= self._CHUNK_SAMPLES:
+            return self._transcribe_chunk(audio, language, task)
+
+        texts = []
+        start = 0
+        while start < len(audio):
+            end = min(start + self._CHUNK_SAMPLES, len(audio))
+            remaining = len(audio) - end
+            if 0 < remaining < self._MIN_TAIL_SAMPLES:
+                end = len(audio)   # Rest absorbieren → max ~27s, sicher unter 30s
+            chunk = audio[start:end]
+            text = self._transcribe_chunk(chunk, language, task)
+            if text:
+                texts.append(text.strip())
+            start = end
+
+        return " ".join(t for t in texts if t)
+
+    def _transcribe_chunk(self, audio: np.ndarray, language: str = None, task: str = "transcribe") -> str:
         wav_path = self._write_temp_wav(audio)
         try:
             with open(wav_path, "rb") as f:
