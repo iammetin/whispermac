@@ -60,6 +60,7 @@ from Quartz import (
 # kCGDirectMainDisplay = 0 (not exported by all PyObjC versions)
 kCGDirectMainDisplay = 0
 
+F9_KEYCODE  = 101
 F13_KEYCODE = 105
 F14_KEYCODE = 107
 F15_KEYCODE = 113
@@ -355,6 +356,7 @@ class WhisperMacApp(rumps.App):
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
         self._last_insert_ends_with_word     = False  # Fallback für iFrames/Browser
         self._last_insert_ends_with_sentence = False  # Fallback: endet mit . ! ?
+        self._f9_is_down         = False
         self._f13_is_down        = False
         self._f13_hold_timer     = None
         self._f13_hold_triggered = False
@@ -1028,6 +1030,11 @@ class WhisperMacApp(rumps.App):
                     if kc in self._CURSOR_MOVE_KEYCODES and not self._is_recording:
                         self._last_insert_ends_with_word     = False
                         self._last_insert_ends_with_sentence = False
+                    if kc == F9_KEYCODE:
+                        if not self._f9_is_down:
+                            self._f9_is_down = True
+                            self._on_fn_press()
+                        return None
                     if kc == F13_KEYCODE:
                         if not self._f13_is_down:
                             self._f13_is_down        = True
@@ -1074,6 +1081,10 @@ class WhisperMacApp(rumps.App):
                         return None
                 elif event_type == kCGEventKeyUp:
                     kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+                    if kc == F9_KEYCODE:
+                        self._f9_is_down = False
+                        self._on_fn_release()
+                        return None
                     if kc == F14_KEYCODE:
                         self._f14_is_down = False
                         self.overlay.hide()
