@@ -90,40 +90,20 @@ else:
     CORRECTOR_PATH     = os.path.join(BASE_DIR, "models", "llm")
     MENUBAR_ICON       = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
-def _find_model(models_dir: str) -> str:
-    """Nimmt die erste .bin-Datei im Modell-Ordner (alphabetisch)."""
-    bins = sorted(f for f in os.listdir(models_dir) if f.endswith(".bin"))
-    if not bins:
-        raise FileNotFoundError(f"Kein GGML-Modell (.bin) in {models_dir} gefunden.")
-    return os.path.join(models_dir, bins[0])
+MODEL_FILENAME = "ggml-large-v3-turbo.bin"
+COREML_ENCODER_DIRNAME = "ggml-large-v3-turbo-encoder.mlmodelc"
 
-def _ensure_coreml_encoder(model_path: str) -> None:
-    """Erstellt bei Bedarf einen Symlink auf einen vorhandenen CoreML-Encoder.
-    whisper.cpp leitet den Encoder-Namen ab, indem es .bin und Quantisierungs-
-    Suffixe (_q5_0 usw.) entfernt. Falls der erwartete Encoder-Ordner fehlt
-    aber ein anderer vorhanden ist, wird ein Symlink gesetzt."""
-    import glob as _glob
-    _QUANT_SUFFIXES = ("_q5_0", "_q4_0", "_q8_0", "_q5_1", "_q4_1",
-                       "_q2_k", "_q3_k", "_q4_k", "_q5_k", "_q6_k")
-    model_dir  = os.path.dirname(model_path)
-    model_stem = os.path.basename(model_path)
-    if model_stem.endswith(".bin"):
-        model_stem = model_stem[:-4]
-    for suf in _QUANT_SUFFIXES:
-        if model_stem.endswith(suf):
-            model_stem = model_stem[:-len(suf)]
-            break
-    expected = os.path.join(model_dir, model_stem + "-encoder.mlmodelc")
-    if os.path.exists(expected):
-        return
-    available = sorted(_glob.glob(os.path.join(model_dir, "*-encoder.mlmodelc")))
-    if not available:
-        return
-    try:
-        os.symlink(available[0], expected)
-        logging.info(f"CoreML-Encoder Symlink: {os.path.basename(expected)} → {os.path.basename(available[0])}")
-    except Exception as e:
-        logging.warning(f"CoreML-Encoder Symlink fehlgeschlagen: {e}")
+
+def _require_file(path: str, label: str) -> str:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"{label} nicht gefunden: {path}")
+    return path
+
+
+def _require_dir(path: str, label: str) -> str:
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f"{label} nicht gefunden: {path}")
+    return path
 
 def _setup_coreml_cache(models_dir: str) -> None:
     """Legt den CoreML-ANE-Cache in den Modell-Ordner, damit alles an einem Ort ist.
@@ -158,9 +138,14 @@ def _setup_coreml_cache(models_dir: str) -> None:
     except Exception as e:
         logging.warning(f"CoreML-Cache Symlink fehlgeschlagen: {e}")
 
-MODEL_PATH = _find_model(_MODELS_DIR)
-_ensure_coreml_encoder(MODEL_PATH)
+MODEL_PATH = _require_file(os.path.join(_MODELS_DIR, MODEL_FILENAME), "Whisper-Modell")
+COREML_ENCODER_PATH = _require_dir(
+    os.path.join(_MODELS_DIR, COREML_ENCODER_DIRNAME),
+    "CoreML-Encoder",
+)
 _setup_coreml_cache(_MODELS_DIR)
+logging.info(f"Whisper-Modell fest konfiguriert: {MODEL_PATH}")
+logging.info(f"CoreML-Encoder fest konfiguriert: {COREML_ENCODER_PATH}")
 
 SETTINGS_FILE = os.path.expanduser("~/.whispermac_settings.json")
 FN_FLAG      = kCGEventFlagMaskSecondaryFn   # 0x800000
