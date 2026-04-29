@@ -632,6 +632,7 @@ class WhisperMacApp(rumps.App):
     _LIVE_MUTABLE_TAIL_WORDS  = 4
     _LIVE_PAUSE_FINALIZE_SECONDS = 0.35
     _LIVE_LLM_MIN_WORDS       = 8
+    _RELEASE_POST_ROLL_SECONDS = 0.5
     _TERMINAL_BUNDLE_IDS = {
         "com.apple.Terminal",
         "com.googlecode.iterm2",
@@ -805,9 +806,18 @@ class WhisperMacApp(rumps.App):
 
     def _live_transcribe_loop(self, seq: int):
         min_samples = int(AudioRecorder.SAMPLE_RATE * self._LIVE_MIN_AUDIO_SECONDS)
-        while self._is_recording and self._transcription_seq == seq and self._live_transcription:
+        while (
+            self._is_recording
+            and self._transcription_seq == seq
+            and self._live_transcription
+            and self._recording_live_active
+        ):
             time.sleep(self._LIVE_TRANSCRIBE_INTERVAL)
-            if not self._is_recording or self._transcription_seq != seq:
+            if (
+                not self._is_recording
+                or self._transcription_seq != seq
+                or not self._recording_live_active
+            ):
                 return
             audio = self.recorder.snapshot()
             if audio is None or len(audio) < min_samples or self._is_silence(audio):
@@ -816,7 +826,11 @@ class WhisperMacApp(rumps.App):
             if not self._transcribe_lock.acquire(blocking=False):
                 continue
             try:
-                if not self._is_recording or self._transcription_seq != seq:
+                if (
+                    not self._is_recording
+                    or self._transcription_seq != seq
+                    or not self._recording_live_active
+                ):
                     return
                 text = self._transcribe_audio(audio, retry_lowercase=False, live_pass=True)
                 words = self._split_words(text)
@@ -1217,6 +1231,7 @@ class WhisperMacApp(rumps.App):
             return
         if not self._is_recording:
             return
+        self._recording_live_active = False
         self.overlay.hide()
         self._status_item.title = (
             "Finalisiere…" if self._session_uses_live(self._transcription_seq) else "Transkribiere…"
@@ -1227,7 +1242,7 @@ class WhisperMacApp(rumps.App):
     def _transcribe_and_insert(self):
         my_seq = self._transcription_seq   # Sequenz beim Start merken
         use_live_mode = self._session_uses_live(my_seq)
-        audio  = self.recorder.stop()
+        audio  = self.recorder.stop(post_roll_seconds=self._RELEASE_POST_ROLL_SECONDS)
         self._is_recording = False
         self._recording_live_active = False
 
@@ -1251,15 +1266,20 @@ class WhisperMacApp(rumps.App):
                     self._clear_live_session(my_seq)
                 return
             if use_live_mode:
-                # Live hat bereits alles erfasst – letzte Wörter direkt finalisieren,
-                # kein erneuter Whisper-Durchlauf nötig.
+                # Beim Loslassen einen echten Final-Pass über das komplette Audio
+                # machen, damit der Abschluss nicht auf dem letzten Live-Stand
+                # hängen bleibt. Falls Whisper hier leer/halluziniert zurückkommt,
+                # den letzten stabilen Live-Stand behalten.
                 with self._live_state_lock:
                     state = self._live_session
                     last_words = list(state["prev_words"]) if state else []
-                final_text = self._join_words(last_words)
-                if not final_text:
-                    # Fallback: Live-Session hatte keine Wörter → normal transkribieren
-                    final_text = self._transcribe_audio(audio, retry_lowercase=True)
+                fallback_text = self._join_words(last_words)
+                final_text = self._transcribe_audio(audio, retry_lowercase=True)
+                if not final_text or self._is_hallucination(final_text):
+                    logging.info(
+                        "Live-Finalisierung: finaler Whisper-Pass leer oder Halluzination, nutze letzten Live-Stand als Fallback"
+                    )
+                    final_text = fallback_text
                 history_text = self._finalize_live_session(my_seq, final_text)
                 if history_text:
                     self._add_to_history(history_text)

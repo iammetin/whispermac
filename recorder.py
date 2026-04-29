@@ -1,5 +1,6 @@
 from collections import deque
 import threading
+import time
 import numpy as np
 import sounddevice as sd
 
@@ -18,6 +19,7 @@ class AudioRecorder:
         self._pre_roll = deque()
         self._pre_roll_samples = 0
         self._pre_roll_max_samples = int(self.SAMPLE_RATE * self.PRE_ROLL_SECONDS)
+        self._recorded_samples = 0
 
     def warmup(self, device=None):
         """Stream dauerhaft öffnen – start()/stop() setzen nur ein Flag, kein Overhead."""
@@ -48,6 +50,7 @@ class AudioRecorder:
         """Aufnahme starten – laufenden Pre-Roll voranstellen, stream läuft bereits."""
         with self._lock:
             self.frames = [chunk.copy() for chunk in self._pre_roll]
+            self._recorded_samples = self._pre_roll_samples
             self._recording = True
 
     def _callback(self, indata, frames, time, status):
@@ -60,11 +63,26 @@ class AudioRecorder:
                 self._pre_roll_samples -= len(dropped)
             if self._recording:
                 self.frames.append(chunk)
+                self._recorded_samples += len(chunk)
 
-    def stop(self) -> np.ndarray | None:
+    def stop(self, post_roll_seconds: float = 0.0) -> np.ndarray | None:
         """Aufnahme stoppen und aufgezeichnete Audio-Daten zurückgeben."""
-        self._recording = False
         with self._lock:
+            start_samples = self._recorded_samples
+        if post_roll_seconds > 0:
+            extra_samples = max(0, int(self.SAMPLE_RATE * post_roll_seconds))
+            deadline = time.monotonic() + post_roll_seconds + max(self.BLOCK_DURATION_SECONDS * 4, 0.1)
+            while True:
+                with self._lock:
+                    if not self._recording:
+                        break
+                    if self._recorded_samples - start_samples >= extra_samples:
+                        break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(min(self.BLOCK_DURATION_SECONDS / 2, 0.01))
+        with self._lock:
+            self._recording = False
             if self.frames:
                 return np.concatenate(self.frames, axis=0).flatten()
         return None
