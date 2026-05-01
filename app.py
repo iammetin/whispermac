@@ -544,13 +544,16 @@ class WhisperMacApp(rumps.App):
         for item in self._history_items:
             item._menuitem.setHidden_(True)
 
+        # KI-Korrektur-Einträge deaktiviert (Logik vorhanden, aktuell nicht genutzt)
+        self._ki_korrektur = False
+        self._ki_item._menuitem.setHidden_(True)
+        self._ki_auswahl_item._menuitem.setHidden_(True)
+
         # Häkchen bei gespeicherter Auswahl setzen
         self._lang_menu_items[self.language]._menuitem.setState_(1)
         self._translate_menu_items[self._translate_to]._menuitem.setState_(1)
         if self._live_transcription:
             self._live_item._menuitem.setState_(1)
-        if self._ki_korrektur:
-            self._ki_item._menuitem.setState_(1)
         self._apply_mic_menu_selection_state()
 
         # Dock-Icon aktivieren
