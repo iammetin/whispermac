@@ -6,6 +6,8 @@ import json
 import os
 import re
 import subprocess
+import ctypes
+import ctypes.util
 import sounddevice as sd
 from deep_translator import GoogleTranslator
 import sys
@@ -176,6 +178,43 @@ TRANSLATE_OPTIONS = [
     ("ar", "→ Arabisch"),
 ]
 
+_COREAUDIO_LIB = None
+
+
+class _CoreAudioPropertyAddress(ctypes.Structure):
+    _fields_ = [
+        ("mSelector", ctypes.c_uint32),
+        ("mScope", ctypes.c_uint32),
+        ("mElement", ctypes.c_uint32),
+    ]
+
+
+def _coreaudio_lib():
+    global _COREAUDIO_LIB
+    if _COREAUDIO_LIB is None:
+        path = ctypes.util.find_library("CoreAudio")
+        if not path:
+            raise RuntimeError("CoreAudio Framework nicht gefunden")
+        lib = ctypes.cdll.LoadLibrary(path)
+        lib.AudioObjectGetPropertyData.argtypes = [
+            ctypes.c_uint32,
+            ctypes.POINTER(_CoreAudioPropertyAddress),
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p,
+        ]
+        lib.AudioObjectGetPropertyData.restype = ctypes.c_int32
+        _COREAUDIO_LIB = lib
+    return _COREAUDIO_LIB
+
+
+_CA_SYSTEM_OBJECT = 1
+_CA_PROP_DEFAULT_INPUT_DEVICE = 1682533920
+_CA_PROP_NAME = 1819173229
+_CA_SCOPE_GLOBAL = 1735159650
+_CA_ELEMENT_MAIN = 0
+
 
 def _list_input_devices():
     """Gibt Liste von (index, name) aller Mikrofon-Geräte zurück.
@@ -198,6 +237,8 @@ def _list_input_devices():
         ]
     except Exception:
         return [(idx, name) for name, idx in sd_map.items()]
+    if not av_names:
+        return [(idx, name) for name, idx in sd_map.items()]
 
     result = []
     for name in av_names:
@@ -210,6 +251,28 @@ def _list_input_devices():
                     break
         result.append((idx, name))
     return result
+
+
+def _normalize_device_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip())
+
+
+def _dedupe_input_devices(devices: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
+    seen: set[str] = set()
+    result: list[tuple[int | None, str]] = []
+    for idx, raw_name in devices:
+        name = _normalize_device_name(raw_name)
+        if not name or name == "System (Standard)" or name in seen:
+            continue
+        seen.add(name)
+        result.append((idx, name))
+    return result
+
+
+def _input_devices_signature(devices: list[tuple[int | None, str]] | None = None) -> tuple[tuple[str, int | None], ...]:
+    if devices is None:
+        devices = _dedupe_input_devices(_list_input_devices())
+    return tuple(sorted((_normalize_device_name(name), idx) for idx, name in devices))
 
 
 class _TranscriptionSpinner:
@@ -306,7 +369,12 @@ class _AppMenuDelegate(AppKit.NSObject):
 
     def menuWillOpen_(self, menu):
         if hasattr(self, '_app'):
-            self._app._refresh_mic_menu()
+            self._app._menu_is_open = True
+            self._app._apply_mic_menu_selection_state()
+
+    def menuDidClose_(self, menu):
+        if hasattr(self, '_app'):
+            self._app._menu_is_open = False
 
 
 class _AppTerminationObserver(AppKit.NSObject):
@@ -337,8 +405,21 @@ class WhisperMacApp(rumps.App):
         self._ki_korrektur, ki_live_prompt, ki_auswahl_prompt = load_ki_settings()
         self.corrector.system_prompt = ki_live_prompt
         self._ki_auswahl_prompt      = ki_auswahl_prompt
-        self._mic_device_name = self._load_raw_setting("mic_device", None)
+        # Mikrofon-Auswahl nicht persistent halten:
+        # jeder Start beginnt im System-Sync-Modus.
+        self._mic_follow_system = True
+        self._mic_device_name = None
         self._mic_device_idx  = None  # wird beim Menü-Aufbau aufgelöst
+        self._last_system_input_device_id = None
+        self._last_input_devices_signature = ()
+        self._last_system_mic_name = None
+        self._system_mic_timer = None
+        self._mic_refresh_lock = threading.Lock()
+        self._recorder_rebind_lock = threading.Lock()
+        self._bound_mic_name = None
+        self._bound_mic_device_idx = None
+        self._bound_recorder_target_device = None
+        self._menu_is_open = False
         self._history         = []   # letzte Transkriptionen (neueste zuerst)
         self._last_insert_ends_with_word     = False  # Fallback für iFrames/Browser
         self._last_insert_ends_with_sentence = False  # Fallback: endet mit . ! ?
@@ -415,12 +496,14 @@ class WhisperMacApp(rumps.App):
         except Exception:
             pass
 
-        for idx, name in _list_input_devices():
+        _initial_input_devices = _dedupe_input_devices(_list_input_devices())
+        for idx, name in _initial_input_devices:
             item = rumps.MenuItem(name, callback=self._on_mic_select)
             self._mic_menu_items[name] = (idx, item)
             if name == self._mic_device_name:
                 self._mic_device_idx = idx
             _initial_mic_items.append(item)
+        self._last_input_devices_signature = _input_devices_signature(_initial_input_devices)
 
         # ── KI-Menü-Einträge ──────────────────────────────────────────────
         self._ki_item         = rumps.MenuItem("KI-Live-Korrektur",    callback=self._on_ki_live_toggle)
@@ -468,11 +551,7 @@ class WhisperMacApp(rumps.App):
             self._live_item._menuitem.setState_(1)
         if self._ki_korrektur:
             self._ki_item._menuitem.setState_(1)
-        saved_mic = self._mic_device_name or "System (Standard)"
-        if saved_mic in self._mic_menu_items:
-            self._mic_menu_items[saved_mic][1]._menuitem.setState_(1)
-        else:
-            self._mic_menu_items["System (Standard)"][1]._menuitem.setState_(1)
+        self._apply_mic_menu_selection_state()
 
         # Dock-Icon aktivieren
         rumps.Timer(self._show_dock_icon, 0.2).start()
@@ -527,7 +606,16 @@ class WhisperMacApp(rumps.App):
         threading.Thread(target=self._preload_model, daemon=True).start()
 
     def _preload_model(self):
-        self.recorder.warmup(device=self._mic_device_idx)
+        selected_name, selected_device_idx = self._get_selected_mic_target()
+        target_device = self._get_recorder_target_device(selected_device_idx)
+        try:
+            self.recorder.warmup(device=target_device)
+            self._bound_mic_name = selected_name
+            self._bound_mic_device_idx = selected_device_idx
+            self._bound_recorder_target_device = target_device
+        except Exception as e:
+            logging.exception(f"Recorder-Warmup fehlgeschlagen, lade Modell trotzdem weiter: {e}")
+        self._start_system_mic_sync()
         self.overlay.prebuild()
         self._set_ui(status="Lade whisper.cpp…")
         try:
@@ -1204,7 +1292,16 @@ class WhisperMacApp(rumps.App):
                 self._live_session = None
         self._play_start_sound()
         self._status_item.title = "Live-Aufnahme läuft…" if self._recording_live_active else "Aufnahme läuft…"
-        self.recorder.start()
+        try:
+            self.recorder.start()
+        except Exception as e:
+            logging.exception(f"Recorder-Start fehlgeschlagen: {e}")
+            self._is_recording = False
+            self._recording_live_active = False
+            with self._live_state_lock:
+                self._live_session = None
+            self._set_ui(status=self._ready_status())
+            return
         self.overlay.show(lambda: self.recorder.current_level)
 
     def _on_fn_release(self):
@@ -1747,7 +1844,6 @@ end tell"""])
             data.update({
                 "language":     self.language,
                 "translate_to": self._translate_to,
-                "mic_device":   self._mic_device_name,
                 "live_transcription": self._live_transcription,
                 "ki_korrektur": self._ki_korrektur,
             })
@@ -1755,6 +1851,181 @@ end tell"""])
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    def _get_system_default_input_device_id(self):
+        try:
+            device_id, _ = self._get_system_default_input_device_info()
+            return device_id
+        except Exception as e:
+            logging.debug(f"System-Default-Mikrofon konnte nicht gelesen werden: {e}")
+            return None
+
+    def _get_system_default_input_device_info(self):
+        coreaudio = _coreaudio_lib()
+
+        default_addr = _CoreAudioPropertyAddress(
+            _CA_PROP_DEFAULT_INPUT_DEVICE,
+            _CA_SCOPE_GLOBAL,
+            _CA_ELEMENT_MAIN,
+        )
+        size = ctypes.c_uint32(ctypes.sizeof(ctypes.c_uint32))
+        device_id = ctypes.c_uint32()
+        status = coreaudio.AudioObjectGetPropertyData(
+            _CA_SYSTEM_OBJECT,
+            ctypes.byref(default_addr),
+            0,
+            None,
+            ctypes.byref(size),
+            ctypes.byref(device_id),
+        )
+        if status != 0 or size.value < 4 or device_id.value == 0:
+            return None, None
+
+        name_addr = _CoreAudioPropertyAddress(
+            _CA_PROP_NAME,
+            _CA_SCOPE_GLOBAL,
+            _CA_ELEMENT_MAIN,
+        )
+        name_size = ctypes.c_uint32(ctypes.sizeof(ctypes.c_void_p))
+        cf_name = ctypes.c_void_p()
+        status = coreaudio.AudioObjectGetPropertyData(
+            device_id.value,
+            ctypes.byref(name_addr),
+            0,
+            None,
+            ctypes.byref(name_size),
+            ctypes.byref(cf_name),
+        )
+        if status != 0 or not cf_name.value:
+            return device_id.value, None
+
+        try:
+            name = str(objc.objc_object(c_void_p=cf_name.value))
+        except Exception:
+            name = None
+        return device_id.value, name
+
+    def _start_system_mic_sync(self):
+        self._last_system_input_device_id = self._get_system_default_input_device_id()
+        self._last_input_devices_signature = _input_devices_signature()
+        if self._system_mic_timer is not None:
+            return
+        self._system_mic_timer = rumps.Timer(self._poll_system_mic, 1.0)
+        self._system_mic_timer.start()
+
+    def _poll_system_mic(self, _timer):
+        if self._is_recording:
+            return
+
+        current_signature = _input_devices_signature()
+        current_id = self._get_system_default_input_device_id()
+        devices_changed = current_signature != self._last_input_devices_signature
+        default_changed = (
+            self._mic_follow_system
+            and current_id is not None
+            and current_id != self._last_system_input_device_id
+        )
+
+        if not devices_changed and not default_changed:
+            return
+
+        old_id = self._last_system_input_device_id
+        self._last_system_input_device_id = current_id
+        old_signature = self._last_input_devices_signature
+        self._last_input_devices_signature = current_signature
+        logging.info(
+            "Mikrofon-Refresh: default_changed=%s devices_changed=%s (%s -> %s, %s -> %s)",
+            default_changed,
+            devices_changed,
+            old_id,
+            current_id,
+            old_signature,
+            current_signature,
+        )
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._refresh_mic_menu)
+
+    def _get_portaudio_default_input_index(self):
+        try:
+            default_devices = sd.default.device
+            if default_devices is None:
+                return None
+            if isinstance(default_devices, (list, tuple)):
+                if not default_devices:
+                    return None
+                idx = default_devices[0]
+            elif hasattr(default_devices, "__getitem__"):
+                idx = default_devices[0]
+            else:
+                idx = default_devices
+            idx = int(idx)
+            return None if idx < 0 else idx
+        except Exception as e:
+            logging.debug(f"PortAudio-Default-Mikrofon konnte nicht gelesen werden: {e}")
+            return None
+
+    def _get_current_system_mic_name(self):
+        _, system_name = self._get_system_default_input_device_info()
+        if system_name:
+            if system_name in self._mic_menu_items:
+                return system_name
+            system_name_lc = system_name.lower()
+            for name in self._mic_menu_items:
+                if name == "System (Standard)":
+                    continue
+                name_lc = name.lower()
+                if system_name_lc in name_lc or name_lc in system_name_lc:
+                    return name
+
+        idx = self._get_portaudio_default_input_index()
+        if idx is not None:
+            for name, (device_idx, _) in self._mic_menu_items.items():
+                if name == "System (Standard)":
+                    continue
+                if device_idx == idx:
+                    return name
+        return None
+
+    def _get_selected_mic_target(self):
+        if self._mic_follow_system:
+            current_name = self._get_current_system_mic_name()
+            if current_name and current_name in self._mic_menu_items:
+                self._last_system_mic_name = current_name
+                device_idx, _ = self._mic_menu_items[current_name]
+                return current_name, device_idx
+            if (
+                self._last_system_mic_name
+                and self._last_system_mic_name in self._mic_menu_items
+            ):
+                device_idx, _ = self._mic_menu_items[self._last_system_mic_name]
+                return self._last_system_mic_name, device_idx
+            return "System (Standard)", None
+
+        selected_name = self._mic_device_name or "System (Standard)"
+        if selected_name in self._mic_menu_items:
+            device_idx, _ = self._mic_menu_items[selected_name]
+            return selected_name, device_idx
+        return "System (Standard)", None
+
+    def _get_recorder_target_device(self, selected_device_idx=None):
+        if self._mic_follow_system:
+            return None
+        if selected_device_idx is not None:
+            return selected_device_idx
+        _, selected_device_idx = self._get_selected_mic_target()
+        return selected_device_idx
+
+    def _apply_mic_menu_selection_state(self):
+        for _, item in self._mic_menu_items.values():
+            item._menuitem.setState_(0)
+
+        selected_name, device_idx = self._get_selected_mic_target()
+        if selected_name in self._mic_menu_items:
+            self._mic_menu_items[selected_name][1]._menuitem.setState_(1)
+        else:
+            self._mic_menu_items["System (Standard)"][1]._menuitem.setState_(1)
+            selected_name = "System (Standard)"
+            device_idx = None
+        return selected_name, device_idx
 
     def _on_lang_select(self, sender):
         for code, label in LANG_OPTIONS:
@@ -1768,71 +2039,158 @@ end tell"""])
 
     def _refresh_mic_menu(self):
         """Aktualisiert die Mikrofonliste (neue Geräte hinzufügen, verschwundene entfernen)."""
+        if not self._mic_refresh_lock.acquire(blocking=False):
+            return
         import collections as _co
-        reinit_done = False
-        if not self._is_recording:
-            try:
-                sd._terminate()
-                sd._initialize()
-                reinit_done = True
-            except Exception:
-                pass
-        current = {name: idx for idx, name in _list_input_devices()}
+        try:
+            if not self._is_recording:
+                try:
+                    sd._terminate()
+                    sd._initialize()
+                except Exception as e:
+                    logging.debug(f"PortAudio-Refresh in _refresh_mic_menu fehlgeschlagen: {e}")
+            current = {
+                _normalize_device_name(name): idx
+                for idx, name in _dedupe_input_devices(_list_input_devices())
+            }
 
-        # Index aktualisieren (kann sich nach Reconnect ändern)
-        for name, idx in current.items():
-            if name in self._mic_menu_items:
-                old_idx, item = self._mic_menu_items[name]
-                if old_idx != idx:
+            # Index aktualisieren (kann sich nach Reconnect ändern)
+            for name, idx in current.items():
+                if name in self._mic_menu_items:
+                    old_idx, item = self._mic_menu_items[name]
+                    if old_idx != idx:
+                        self._mic_menu_items[name] = (idx, item)
+                        if self._mic_device_name == name:
+                            self._mic_device_idx = idx
+
+            # Neue Geräte hinzufügen – direkt hinter letztem bekannten Mic-Eintrag
+            for name, idx in current.items():
+                if name not in self._mic_menu_items:
+                    item = rumps.MenuItem(name, callback=self._on_mic_select)
+                    last_item = list(self._mic_menu_items.values())[-1][1]
+                    pos = self.menu._menu.indexOfItem_(last_item._menuitem) + 1
+                    self.menu._menu.insertItem_atIndex_(item._menuitem, pos)
+                    _co.OrderedDict.__setitem__(self.menu, name, item)
                     self._mic_menu_items[name] = (idx, item)
-                    if self._mic_device_name == name:
+                    if name == self._mic_device_name:
                         self._mic_device_idx = idx
 
-        # Neue Geräte hinzufügen – direkt hinter letztem bekannten Mic-Eintrag
-        for name, idx in current.items():
-            if name not in self._mic_menu_items:
-                item = rumps.MenuItem(name, callback=self._on_mic_select)
-                last_item = list(self._mic_menu_items.values())[-1][1]
-                pos = self.menu._menu.indexOfItem_(last_item._menuitem) + 1
-                self.menu._menu.insertItem_atIndex_(item._menuitem, pos)
-                _co.OrderedDict.__setitem__(self.menu, name, item)
-                self._mic_menu_items[name] = (idx, item)
-                if name == self._mic_device_name:
-                    for _, (_, it) in self._mic_menu_items.items():
-                        it._menuitem.setState_(0)
-                    item._menuitem.setState_(1)
-                    self._mic_device_idx = idx
+            # Verschwundene Geräte entfernen
+            for name in list(self._mic_menu_items.keys()):
+                if name == "System (Standard)":
+                    continue
+                if name not in current:
+                    if name in self.menu:
+                        del self.menu[name]
+                    del self._mic_menu_items[name]
+                    if self._mic_device_name == name:
+                        self._mic_follow_system = True
+                        self._mic_device_name = None
+                        self._mic_device_idx  = None
 
-        # Verschwundene Geräte entfernen
-        for name in list(self._mic_menu_items.keys()):
-            if name == "System (Standard)":
-                continue
-            if name not in current:
-                del self.menu[name]
-                del self._mic_menu_items[name]
-                if self._mic_device_name == name:
-                    self._mic_device_name = None
-                    self._mic_device_idx  = None
-                    self._mic_menu_items["System (Standard)"][1]._menuitem.setState_(1)
+            self._last_system_input_device_id = self._get_system_default_input_device_id()
+            self._last_input_devices_signature = tuple(sorted(current.items()))
+            self._apply_mic_menu_selection_state()
+            self._schedule_recorder_rebind("Mikrofonliste geändert", force=True)
+        finally:
+            self._mic_refresh_lock.release()
 
-        # PortAudio-Reset hat den dauerhaften Stream im Recorder abgerissen →
-        # sofort neu öffnen, damit die nächste Aufnahme ohne Klick funktioniert
-        if reinit_done:
+    def _close_recorder_stream_for_rebind(self):
+        stream = getattr(self.recorder, "_stream", None)
+        if stream is None:
+            return
+        try:
+            stream.stop()
+        except Exception as e:
+            logging.debug(f"Recorder-Stream stop vor Rebind fehlgeschlagen: {e}")
+        try:
+            stream.close()
+        except Exception as e:
+            logging.debug(f"Recorder-Stream close vor Rebind fehlgeschlagen: {e}")
+        self.recorder._stream = None
+
+    def _restart_recorder_stream(self, target_device, reason):
+        last_error = None
+        for delay in (0.0, 0.15, 0.5):
+            if delay > 0:
+                time.sleep(delay)
+            self._close_recorder_stream_for_rebind()
             try:
-                self.recorder.set_device(self._mic_device_idx)
-            except Exception:
-                pass
+                sd._terminate()
+            except Exception as e:
+                logging.debug(f"PortAudio terminate vor Rebind fehlgeschlagen ({reason}): {e}")
+            try:
+                sd._initialize()
+            except Exception as e:
+                logging.debug(f"PortAudio initialize vor Rebind fehlgeschlagen ({reason}): {e}")
+            time.sleep(0.05)
+            try:
+                self.recorder.warmup(device=target_device)
+                return
+            except Exception as e:
+                last_error = e
+                logging.warning(
+                    "Recorder-Rebind Versuch fehlgeschlagen "
+                    f"({reason}, target_device={target_device}, retry_delay={delay}): {e}"
+                )
+        if last_error is not None:
+            raise last_error
+
+    def _rebind_recorder_to_current_selection(self, reason, force=False):
+        with self._recorder_rebind_lock:
+            selected_name, selected_device_idx = self._get_selected_mic_target()
+            target_device = self._get_recorder_target_device(selected_device_idx)
+            if (
+                not force
+                and selected_name == self._bound_mic_name
+                and selected_device_idx == self._bound_mic_device_idx
+            ):
+                return
+            logging.info(
+                "Recorder-Mikrofon neu binden (%s): %s/%s/%s -> %s/%s/%s",
+                reason,
+                self._bound_mic_name,
+                self._bound_mic_device_idx,
+                self._bound_recorder_target_device,
+                selected_name,
+                selected_device_idx,
+                target_device,
+            )
+            try:
+                self._restart_recorder_stream(target_device, reason)
+            except Exception as e:
+                logging.exception(
+                    "Recorder-Stream konnte nicht neu geöffnet werden (%s, mic=%s, selected_device=%s, target_device=%s): %s",
+                    reason,
+                    selected_name,
+                    selected_device_idx,
+                    target_device,
+                    e,
+                )
+                return
+            self._bound_mic_name = selected_name
+            self._bound_mic_device_idx = selected_device_idx
+            self._bound_recorder_target_device = target_device
+
+    def _schedule_recorder_rebind(self, reason, force=False):
+        if self._is_recording:
+            return
+        threading.Thread(
+            target=self._rebind_recorder_to_current_selection,
+            args=(reason, force),
+            daemon=True,
+        ).start()
 
     def _on_mic_select(self, sender):
-        for name, (idx, item) in self._mic_menu_items.items():
-            item._menuitem.setState_(0)
         name = sender.title
         if name in self._mic_menu_items:
             idx, item = self._mic_menu_items[name]
-            item._menuitem.setState_(1)
-            self._mic_device_idx  = idx
-            self._mic_device_name = None if name == "System (Standard)" else name
-            threading.Thread(target=self.recorder.set_device, args=(idx,), daemon=True).start()
+            self._mic_follow_system = (name == "System (Standard)")
+            self._mic_device_idx  = None if self._mic_follow_system else idx
+            self._mic_device_name = None if self._mic_follow_system else name
+            self._last_system_input_device_id = self._get_system_default_input_device_id()
+            self._apply_mic_menu_selection_state()
+            self._schedule_recorder_rebind("manuelle Mikrofonauswahl", force=True)
             self._save_settings()
 
     def _on_translate_select(self, sender):
