@@ -617,7 +617,10 @@ class WhisperMacApp(rumps.App):
             logging.exception(f"Recorder-Warmup fehlgeschlagen, lade Modell trotzdem weiter: {e}")
         self._start_system_mic_sync()
         self.overlay.prebuild()
-        self._set_ui(status="Lade whisper.cpp…")
+        if not self.transcriber.ane_cache_valid():
+            self._set_ui(status="ANE-Kompilierung (~10 Min.)…")
+        else:
+            self._set_ui(status="Lade whisper.cpp…")
         try:
             self.transcriber.preload()
         except Exception as e:

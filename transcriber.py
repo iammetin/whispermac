@@ -18,6 +18,7 @@ import numpy as np
 
 class Transcriber:
     _READY_TIMEOUT = 90.0
+    _COLD_COMPILE_TIMEOUT = 900.0  # ANE-Erstkompilierung dauert ~10 Minuten
     _HEALTH_INTERVAL = 0.25
 
     def __init__(
@@ -157,19 +158,18 @@ class Transcriber:
 
             self._cleanup_stale_servers()
             errors = []
-            # CoreML-Encoder wird von whisper.cpp aus dem Modellnamen abgeleitet.
-            # Wenn kein passender Encoder existiert, GPU-Versuch überspringen.
-            _QUANT_SUFFIXES = ("_q5_0", "_q4_0", "_q8_0", "_q5_1", "_q4_1",
-                               "_q2_k", "_q3_k", "_q4_k", "_q5_k", "_q6_k")
-            _stem = os.path.basename(self.model_path)
-            if _stem.endswith(".bin"):
-                _stem = _stem[:-4]
-            for _suf in _QUANT_SUFFIXES:
-                if _stem.endswith(_suf):
-                    _stem = _stem[:-len(_suf)]
-                    break
-            coreml_encoder = os.path.join(os.path.dirname(self.model_path), _stem + "-encoder.mlmodelc")
-            has_coreml = os.path.isdir(coreml_encoder)
+            has_coreml = os.path.isdir(self._encoder_path())
+            if self.use_gpu and has_coreml:
+                self._protect_coreml_encoder()
+                cache_ok = self.ane_cache_valid()
+                start_timeout = self._READY_TIMEOUT if cache_ok else self._COLD_COMPILE_TIMEOUT
+                if not cache_ok:
+                    logging.warning(
+                        "Kein valider ANE-Cache vorhanden. "
+                        "Erstmalige CoreML-Kompilierung läuft (ca. 10 Min.) — bitte warten."
+                    )
+            else:
+                start_timeout = self._READY_TIMEOUT
             attempts = [True, False] if (self.use_gpu and has_coreml) else [False]
 
             for use_gpu in attempts:
@@ -202,7 +202,7 @@ class Transcriber:
                 )
                 threading.Thread(target=self._log_server_output, daemon=True).start()
                 try:
-                    self._wait_until_ready()
+                    self._wait_until_ready(timeout=start_timeout if use_gpu else self._READY_TIMEOUT)
                     if use_gpu:
                         logging.info("whisper.cpp läuft mit GPU/Metal")
                     else:
@@ -270,8 +270,89 @@ class Transcriber:
         for line in proc.stdout:
             logging.info("whisper.cpp: %s", line.rstrip())
 
-    def _wait_until_ready(self):
-        deadline = time.time() + self._READY_TIMEOUT
+    def _encoder_path(self) -> str:
+        stem = os.path.basename(self.model_path)
+        if stem.endswith(".bin"):
+            stem = stem[:-4]
+        for suf in ("_q5_0", "_q4_0", "_q8_0", "_q5_1", "_q4_1",
+                    "_q2_k", "_q3_k", "_q4_k", "_q5_k", "_q6_k"):
+            if stem.endswith(suf):
+                stem = stem[:-len(suf)]
+                break
+        return os.path.join(os.path.dirname(self.model_path), stem + "-encoder.mlmodelc")
+
+    def _protect_coreml_encoder(self) -> None:
+        """Entfernt .DS_Store aus dem .mlmodelc-Ordner und macht ihn read-only.
+
+        .DS_Store ändert das mtime des Verzeichnisses → CoreML berechnet einen anderen
+        ANE-Cache-Hash → Cache-Miss → langsamer/fehlgeschlagener Start.
+        """
+        encoder_dir = self._encoder_path()
+        if not os.path.isdir(encoder_dir):
+            return
+
+        # .DS_Store und andere versteckte Schreibreste entfernen
+        for name in os.listdir(encoder_dir):
+            if name.startswith("."):
+                try:
+                    os.remove(os.path.join(encoder_dir, name))
+                    logging.info("CoreML-Encoder: %s entfernt", name)
+                except Exception as e:
+                    logging.warning("CoreML-Encoder: %s konnte nicht entfernt werden: %s", name, e)
+
+        # mtime an interne Dateien angleichen (stabilisiert den CoreML-Cache-Hash)
+        try:
+            inner_mtimes = [
+                os.path.getmtime(os.path.join(encoder_dir, f))
+                for f in os.listdir(encoder_dir)
+                if not f.startswith(".")
+            ]
+            if inner_mtimes:
+                stable = max(inner_mtimes)
+                os.utime(encoder_dir, (stable, stable))
+        except Exception as e:
+            logging.warning("CoreML-Encoder: mtime konnte nicht gesetzt werden: %s", e)
+
+        # Verzeichnis read-only machen → verhindert zukünftige .DS_Store-Erstellung
+        try:
+            mode = os.stat(encoder_dir).st_mode
+            if mode & 0o222:
+                os.chmod(encoder_dir, mode & ~0o222)
+                logging.info("CoreML-Encoder: Verzeichnis auf read-only gesetzt")
+        except Exception as e:
+            logging.warning("CoreML-Encoder: chmod fehlgeschlagen: %s", e)
+
+    def ane_cache_valid(self) -> bool:
+        """True wenn ein vollständiger ANE-Bundle-Cache für das aktuelle macOS existiert."""
+        if not self.use_gpu:
+            return True
+        try:
+            build = subprocess.check_output(["sw_vers", "-buildVersion"], text=True).strip()
+        except Exception:
+            return False
+        cache_root = os.path.join(
+            os.path.expanduser("~/Library/Caches/whisper-server"),
+            "com.apple.e5rt.e5bundlecache",
+            build,
+        )
+        if not os.path.isdir(cache_root):
+            return False
+        for outer in os.listdir(cache_root):
+            outer_path = os.path.join(cache_root, outer)
+            if not os.path.isdir(outer_path):
+                continue
+            for bundle in os.listdir(outer_path):
+                if ".tmp." in bundle or not bundle.endswith(".bundle"):
+                    continue
+                for root, _, files in os.walk(os.path.join(outer_path, bundle)):
+                    if "weights1.bin" in files:
+                        w = os.path.join(root, "weights1.bin")
+                        if os.path.getsize(w) > 1_000_000:
+                            return True
+        return False
+
+    def _wait_until_ready(self, timeout: float | None = None):
+        deadline = time.time() + (timeout if timeout is not None else self._READY_TIMEOUT)
         while time.time() < deadline:
             if self._server_proc is None:
                 raise RuntimeError("whisper.cpp Serverprozess fehlt")
@@ -280,7 +361,8 @@ class Transcriber:
             if self._is_server_ready():
                 return
             time.sleep(self._HEALTH_INTERVAL)
-        raise TimeoutError("whisper.cpp Server wurde nicht rechtzeitig bereit")
+        active = timeout if timeout is not None else self._READY_TIMEOUT
+        raise TimeoutError(f"whisper.cpp Server wurde nicht rechtzeitig bereit (Timeout: {active:.0f}s)")
 
     def _is_server_ready(self) -> bool:
         if self._port is None:
