@@ -1443,6 +1443,7 @@ class WhisperMacApp(rumps.App):
         self._fn_press_time = now
         if self._is_recording:
             return
+        self._sync_mic_selection_for_recording_start()
         self._is_recording = True
         self._recording_live_active = False
         self._transcription_seq += 1
@@ -1465,6 +1466,29 @@ class WhisperMacApp(rumps.App):
             self._set_ui(status=self._ready_status())
             return
         self.overlay.show(lambda: self.recorder.current_level)
+
+    def _sync_mic_selection_for_recording_start(self):
+        if self._is_recording or not self._mic_follow_system:
+            return
+
+        try:
+            current_default_id = self._get_system_default_input_device_id()
+            if current_default_id is None or current_default_id == self._last_system_input_device_id:
+                return
+
+            with self._recorder_rebind_lock:
+                logging.info(
+                    "Recorder vor Aufnahme auf neues System-Mikro synchronisieren: %s -> %s",
+                    self._last_system_input_device_id,
+                    current_default_id,
+                )
+                self._restart_recorder_stream(None, "Vor Aufnahme mit System-Mikro synchronisieren")
+                self._bound_mic_name = "System (Standard)"
+                self._bound_mic_device_idx = None
+                self._bound_recorder_target_device = None
+                self._last_system_input_device_id = current_default_id
+        except Exception as e:
+            logging.debug(f"Recorder-Sync vor Aufnahme fehlgeschlagen: {e}")
 
     def _on_fn_release(self):
         now = time.time()
