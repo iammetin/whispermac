@@ -524,7 +524,9 @@ class _AppMenuDelegate(AppKit.NSObject):
     def menuWillOpen_(self, menu):
         if hasattr(self, '_app'):
             self._app._menu_is_open = True
-            self._app._refresh_mic_menu(refresh_portaudio=False)
+            self._app._refresh_mic_menu(
+                refresh_portaudio=self._app._should_refresh_portaudio_on_menu_open()
+            )
 
     def menuDidClose_(self, menu):
         if hasattr(self, '_app'):
@@ -2052,6 +2054,36 @@ end tell"""])
         self._system_mic_timer = rumps.Timer(self._poll_system_mic, 1.0)
         self._system_mic_timer.start()
 
+    def _current_coreaudio_device_signature(self) -> tuple[tuple[str, int], ...]:
+        return tuple(
+            sorted(
+                (_normalize_device_name(name), device_id)
+                for device_id, name in _list_coreaudio_input_devices()
+                if _normalize_device_name(name)
+            )
+        )
+
+    def _current_menu_device_signature(self) -> tuple[tuple[str, int | None], ...]:
+        return tuple(
+            sorted(
+                (_normalize_device_name(name), device_id)
+                for name, (device_id, _, _) in self._mic_menu_items.items()
+                if name != "System (Standard)" and device_id is not None
+            )
+        )
+
+    def _should_refresh_portaudio_on_menu_open(self) -> bool:
+        if self._is_recording:
+            return False
+        try:
+            current_default_id = self._get_system_default_input_device_id()
+            if current_default_id != self._last_system_input_device_id:
+                return True
+            return self._current_coreaudio_device_signature() != self._current_menu_device_signature()
+        except Exception as e:
+            logging.debug(f"PortAudio-Refresh beim Menü-Öffnen konnte nicht entschieden werden: {e}")
+            return False
+
     def _poll_system_mic(self, _timer):
         if self._is_recording:
             return
@@ -2069,9 +2101,7 @@ end tell"""])
             return
 
         old_id = self._last_system_input_device_id
-        self._last_system_input_device_id = current_id
         old_signature = self._last_input_devices_signature
-        self._last_input_devices_signature = current_signature
         logging.info(
             "Mikrofon-Refresh: default_changed=%s devices_changed=%s (%s -> %s, %s -> %s)",
             default_changed,
@@ -2180,12 +2210,7 @@ end tell"""])
                 self._last_system_mic_name = current_name
                 _, device_idx, _ = self._mic_menu_items[current_name]
                 return current_name, device_idx
-            if (
-                self._last_system_mic_name
-                and self._last_system_mic_name in self._mic_menu_items
-            ):
-                _, device_idx, _ = self._mic_menu_items[self._last_system_mic_name]
-                return self._last_system_mic_name, device_idx
+            self._last_system_mic_name = None
             return "System (Standard)", None
 
         selected_name = self._mic_device_name or "System (Standard)"
@@ -2263,6 +2288,9 @@ end tell"""])
 
             self._last_system_input_device_id = current_default_id
             self._last_input_devices_signature = current_signature
+            if self._mic_follow_system:
+                current_name = self._get_current_system_mic_name()
+                self._last_system_mic_name = current_name if current_name in self._mic_menu_items else None
             self._apply_mic_menu_selection_state()
             if devices_changed or (self._mic_follow_system and default_changed):
                 reason = "Mikrofonliste geändert" if devices_changed else "System-Mikrofon geändert"
