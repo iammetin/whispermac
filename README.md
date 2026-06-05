@@ -38,7 +38,7 @@ WhisperMac lives in your menu bar and lets you dictate into any app, at any time
 - macOS 13 Ventura or later
 - Apple Silicon Mac (M1 / M2 / M3 / M4)
 - Python 3.11
-- The bundled `whisper.cpp` runtime and `ggml-large-v3-turbo` model inside this project
+- The bundled `whisper.cpp` runtime and exactly one Whisper `.bin` model inside `models/whisper-cpp/`
 
 ---
 
@@ -80,17 +80,19 @@ pip install -r requirements.txt
 
 #### 3. whisper.cpp runtime / model
 
-This project now uses a **project-local `whisper.cpp` runtime** and a **`ggml-large-v3-turbo` model**.
+This project now uses a **project-local `whisper.cpp` runtime** and auto-detects **exactly one Whisper `.bin` model** from `models/whisper-cpp/`.
 
 Expected paths:
 
 ```text
 vendor/whisper.cpp-runtime/build/bin/whisper-server
-models/whisper-cpp/ggml-large-v3-turbo.bin
-models/whisper-cpp/ggml-large-v3-turbo-encoder.mlmodelc/
+models/whisper-cpp/<your-model>.bin
+models/whisper-cpp/<matching-model>-encoder.mlmodelc/
 ```
 
-If those files are present, nothing else is required for speech recognition.
+Keep exactly one `.bin` in `models/whisper-cpp/`. WhisperMac derives the matching `-encoder.mlmodelc` from that filename automatically.
+
+If the matching encoder is missing, WhisperMac now tries to generate it automatically on first start using the official `whisper.cpp` Core ML workflow. This works for the standard Whisper model names supported by `whisper.cpp`.
 
 #### 4. Build and run
 

@@ -92,62 +92,86 @@ else:
     CORRECTOR_PATH     = os.path.join(BASE_DIR, "models", "llm")
     MENUBAR_ICON       = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
-MODEL_FILENAME = "ggml-large-v3-turbo.bin"
-COREML_ENCODER_DIRNAME = "ggml-large-v3-turbo-encoder.mlmodelc"
-
-
 def _require_file(path: str, label: str) -> str:
     if not os.path.isfile(path):
         raise FileNotFoundError(f"{label} nicht gefunden: {path}")
     return path
 
 
-def _require_dir(path: str, label: str) -> str:
-    if not os.path.isdir(path):
-        raise FileNotFoundError(f"{label} nicht gefunden: {path}")
-    return path
+def _normalized_encoder_stem(model_path: str) -> str:
+    stem = os.path.basename(model_path)
+    if stem.endswith(".bin"):
+        stem = stem[:-4]
+    for suf in ("_q5_0", "_q4_0", "_q8_0", "_q5_1", "_q4_1",
+                "_q2_k", "_q3_k", "_q4_k", "_q5_k", "_q6_k"):
+        if stem.endswith(suf):
+            stem = stem[:-len(suf)]
+            break
+    return stem
 
-def _setup_coreml_cache(models_dir: str) -> None:
-    """Legt den CoreML-ANE-Cache in den Modell-Ordner, damit alles an einem Ort ist.
-    ~/Library/Caches/whisper-server/ wird als Symlink auf models/whisper-cpp/.cache/ gesetzt.
-    Vorhandene Cache-Einträge werden dorthin verschoben."""
+
+def _discover_model_path(models_dir: str) -> str:
+    candidates = sorted(
+        os.path.join(models_dir, name)
+        for name in os.listdir(models_dir)
+        if name.endswith(".bin") and os.path.isfile(os.path.join(models_dir, name))
+    )
+    if not candidates:
+        raise FileNotFoundError(f"Kein Whisper-Modell (*.bin) gefunden in: {models_dir}")
+    if len(candidates) > 1:
+        raise RuntimeError(
+            "Mehr als ein Whisper-Modell gefunden. "
+            f"Bitte nur eine .bin in {models_dir} belassen: "
+            + ", ".join(os.path.basename(path) for path in candidates)
+        )
+    return candidates[0]
+
+
+def _expected_encoder_path(model_path: str) -> str:
+    stem = _normalized_encoder_stem(model_path)
+    return os.path.join(os.path.dirname(model_path), stem + "-encoder.mlmodelc")
+
+
+def _restore_default_coreml_cache_dir() -> None:
+    """Entfernt alte Projekt-Umleitungen und stellt den macOS-Standardpfad wieder her."""
     import shutil
-    project_cache = os.path.join(models_dir, ".cache")
-    system_cache  = os.path.expanduser("~/Library/Caches/whisper-server")
-    os.makedirs(project_cache, exist_ok=True)
-    if os.path.islink(system_cache):
-        if os.path.realpath(system_cache) == os.path.realpath(project_cache):
-            return  # Symlink zeigt bereits auf richtiges Ziel
+
+    system_cache = os.path.expanduser("~/Library/Caches/whisper-server")
+    if not os.path.islink(system_cache):
+        return
+
+    old_target = os.path.realpath(system_cache)
+    try:
         os.remove(system_cache)
-    elif os.path.isdir(system_cache):
-        # Vorhandene Cache-Einträge verschieben, dann Verzeichnis ersetzen
-        for item in os.listdir(system_cache):
-            src = os.path.join(system_cache, item)
-            dst = os.path.join(project_cache, item)
-            if not os.path.exists(dst):
+        os.makedirs(system_cache, exist_ok=True)
+        if os.path.isdir(old_target):
+            for item in os.listdir(old_target):
+                src = os.path.join(old_target, item)
+                dst = os.path.join(system_cache, item)
+                if os.path.exists(dst):
+                    continue
                 try:
                     shutil.move(src, dst)
                 except Exception as e:
-                    logging.warning(f"Cache-Migration fehlgeschlagen ({item}): {e}")
-        try:
-            shutil.rmtree(system_cache)
-        except Exception as e:
-            logging.warning(f"Cache-Ordner konnte nicht entfernt werden: {e}")
-            return
-    try:
-        os.symlink(project_cache, system_cache)
-        logging.info(f"CoreML-Cache → {project_cache}")
+                    logging.warning("CoreML-Cache konnte %s nicht zurück migrieren: %s", src, e)
+        logging.info("CoreML-Cache wieder auf macOS-Standardpfad zurückgestellt")
     except Exception as e:
-        logging.warning(f"CoreML-Cache Symlink fehlgeschlagen: {e}")
+        logging.warning("CoreML-Cache-Umleitung konnte nicht entfernt werden: %s", e)
 
-MODEL_PATH = _require_file(os.path.join(_MODELS_DIR, MODEL_FILENAME), "Whisper-Modell")
-COREML_ENCODER_PATH = _require_dir(
-    os.path.join(_MODELS_DIR, COREML_ENCODER_DIRNAME),
-    "CoreML-Encoder",
-)
-_setup_coreml_cache(_MODELS_DIR)
-logging.info(f"Whisper-Modell fest konfiguriert: {MODEL_PATH}")
-logging.info(f"CoreML-Encoder fest konfiguriert: {COREML_ENCODER_PATH}")
+
+MODEL_PATH = _require_file(_discover_model_path(_MODELS_DIR), "Whisper-Modell")
+COREML_ENCODER_PATH = _expected_encoder_path(MODEL_PATH)
+_restore_default_coreml_cache_dir()
+logging.info(f"Whisper-Modell automatisch erkannt: {MODEL_PATH}")
+if os.path.isdir(COREML_ENCODER_PATH):
+    logging.info(f"CoreML-Encoder automatisch erkannt: {COREML_ENCODER_PATH}")
+else:
+    logging.warning(
+        "Kein passender CoreML-Encoder gefunden: %s "
+        "(GPU/ANE nur mit passendem -encoder.mlmodelc)",
+        COREML_ENCODER_PATH,
+    )
+logging.info("CoreML-Cache bleibt am Standardort von macOS (keine Projekt-Umleitung)")
 
 SETTINGS_FILE = os.path.expanduser("~/.whispermac_settings.json")
 FN_FLAG      = kCGEventFlagMaskSecondaryFn   # 0x800000
@@ -776,7 +800,9 @@ class WhisperMacApp(rumps.App):
             logging.exception(f"Recorder-Warmup fehlgeschlagen, lade Modell trotzdem weiter: {e}")
         self._start_system_mic_sync()
         self.overlay.prebuild()
-        if not self.transcriber.ane_cache_valid():
+        if self.transcriber.needs_coreml_encoder_generation():
+            self._set_ui(status="Erzeuge CoreML-Encoder…")
+        elif not self.transcriber.ane_cache_valid():
             self._set_ui(status="ANE-Kompilierung (~10 Min.)…")
         else:
             self._set_ui(status="Lade whisper.cpp…")

@@ -3,3 +3,7 @@ pyobjc==12.1
 rumps==0.4.0
 sounddevice==0.5.5
 deep-translator==1.11.4
+torch
+coremltools
+openai-whisper
+ane_transformers

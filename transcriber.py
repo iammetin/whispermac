@@ -5,6 +5,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -158,6 +159,7 @@ class Transcriber:
 
             self._cleanup_stale_servers()
             errors = []
+            self._ensure_coreml_encoder()
             has_coreml = os.path.isdir(self._encoder_path())
             if self.use_gpu and has_coreml:
                 self._protect_coreml_encoder()
@@ -281,8 +283,79 @@ class Transcriber:
                 break
         return os.path.join(os.path.dirname(self.model_path), stem + "-encoder.mlmodelc")
 
+    def _coreml_conversion_model_name(self) -> str | None:
+        stem = os.path.basename(self._encoder_path())
+        if stem.endswith("-encoder.mlmodelc"):
+            stem = stem[:-len("-encoder.mlmodelc")]
+        if stem.startswith("ggml-"):
+            stem = stem[5:]
+        aliases = {
+            "large": "large-v3",
+            "turbo": "large-v3-turbo",
+        }
+        supported = {
+            "tiny",
+            "tiny.en",
+            "base",
+            "base.en",
+            "small",
+            "small.en",
+            "small.en-tdrz",
+            "medium",
+            "medium.en",
+            "large-v1",
+            "large-v2",
+            "large-v3",
+            "large-v3-turbo",
+        }
+        stem = aliases.get(stem, stem)
+        return stem if stem in supported else None
+
+    def needs_coreml_encoder_generation(self) -> bool:
+        return self.use_gpu and not os.path.isdir(self._encoder_path()) and self._coreml_conversion_model_name() is not None
+
+    def _ensure_coreml_encoder(self) -> None:
+        if not self.use_gpu or os.path.isdir(self._encoder_path()):
+            return
+
+        model_name = self._coreml_conversion_model_name()
+        if not model_name:
+            logging.warning(
+                "Kein Auto-Build fuer CoreML-Encoder moeglich: Modell %s wird nicht offiziell unterstuetzt",
+                self.model_path,
+            )
+            return
+
+        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "generate_coreml_encoder.py")
+        if not os.path.isfile(script_path):
+            logging.warning("CoreML-Generator-Skript fehlt: %s", script_path)
+            return
+
+        logging.info("Erzeuge CoreML-Encoder automatisch fuer %s", model_name)
+        cmd = [
+            sys.executable,
+            script_path,
+            "--model-bin",
+            self.model_path,
+        ]
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if proc.stdout:
+            for line in proc.stdout.splitlines():
+                logging.info("coreml-build: %s", line)
+        if proc.returncode != 0:
+            logging.warning(
+                "CoreML-Encoder-Auto-Build fehlgeschlagen fuer %s (Exit %s). Fallback ohne CoreML.",
+                model_name,
+                proc.returncode,
+            )
+
     def _protect_coreml_encoder(self) -> None:
-        """Entfernt .DS_Store aus dem .mlmodelc-Ordner und macht ihn read-only.
+        """Entfernt versteckte Schreibreste und stabilisiert den .mlmodelc-Zustand.
 
         .DS_Store ändert das mtime des Verzeichnisses → CoreML berechnet einen anderen
         ANE-Cache-Hash → Cache-Miss → langsamer/fehlgeschlagener Start.
@@ -291,64 +364,115 @@ class Transcriber:
         if not os.path.isdir(encoder_dir):
             return
 
-        # .DS_Store und andere versteckte Schreibreste entfernen
-        for name in os.listdir(encoder_dir):
-            if name.startswith("."):
+        # Versteckte Schreibreste rekursiv entfernen.
+        for root, dirs, files in os.walk(encoder_dir, topdown=False):
+            for name in files:
+                if not name.startswith("."):
+                    continue
+                path = os.path.join(root, name)
                 try:
-                    os.remove(os.path.join(encoder_dir, name))
-                    logging.info("CoreML-Encoder: %s entfernt", name)
+                    os.remove(path)
+                    logging.info("CoreML-Encoder: %s entfernt", path)
                 except Exception as e:
-                    logging.warning("CoreML-Encoder: %s konnte nicht entfernt werden: %s", name, e)
+                    logging.warning("CoreML-Encoder: %s konnte nicht entfernt werden: %s", path, e)
+            for name in dirs:
+                if not name.startswith("."):
+                    continue
+                path = os.path.join(root, name)
+                try:
+                    os.rmdir(path)
+                    logging.info("CoreML-Encoder: leeres Verzeichnis %s entfernt", path)
+                except OSError:
+                    pass
+                except Exception as e:
+                    logging.warning("CoreML-Encoder: Verzeichnis %s konnte nicht entfernt werden: %s", path, e)
 
-        # mtime an interne Dateien angleichen (stabilisiert den CoreML-Cache-Hash)
+        # mtimes aller Verzeichnisse auf einen stabilen Wert setzen.
         try:
             inner_mtimes = [
-                os.path.getmtime(os.path.join(encoder_dir, f))
-                for f in os.listdir(encoder_dir)
-                if not f.startswith(".")
+                os.path.getmtime(os.path.join(root, name))
+                for root, _, files in os.walk(encoder_dir)
+                for name in files
+                if not name.startswith(".")
             ]
             if inner_mtimes:
                 stable = max(inner_mtimes)
-                os.utime(encoder_dir, (stable, stable))
+                for root, dirs, _ in os.walk(encoder_dir, topdown=False):
+                    for name in dirs:
+                        os.utime(os.path.join(root, name), (stable, stable))
+                    os.utime(root, (stable, stable))
         except Exception as e:
             logging.warning("CoreML-Encoder: mtime konnte nicht gesetzt werden: %s", e)
 
-        # Verzeichnis read-only machen → verhindert zukünftige .DS_Store-Erstellung
+        # Rekursiv write-Bits entfernen → verhindert zukünftige .DS_Store-/Finder-Schreibreste.
         try:
-            mode = os.stat(encoder_dir).st_mode
-            if mode & 0o222:
-                os.chmod(encoder_dir, mode & ~0o222)
-                logging.info("CoreML-Encoder: Verzeichnis auf read-only gesetzt")
+            touched = False
+            for root, dirs, files in os.walk(encoder_dir):
+                for name in dirs + files:
+                    path = os.path.join(root, name)
+                    mode = os.stat(path).st_mode
+                    if mode & 0o222:
+                        os.chmod(path, mode & ~0o222)
+                        touched = True
+                mode = os.stat(root).st_mode
+                if mode & 0o222:
+                    os.chmod(root, mode & ~0o222)
+                    touched = True
+            if touched:
+                logging.info("CoreML-Encoder: rekursiv auf read-only gesetzt")
         except Exception as e:
             logging.warning("CoreML-Encoder: chmod fehlgeschlagen: %s", e)
+
+    def _cache_root(self) -> str:
+        try:
+            build = subprocess.check_output(["sw_vers", "-buildVersion"], text=True).strip()
+        except Exception:
+            return ""
+        return os.path.join(
+            os.path.expanduser("~/Library/Caches/whisper-server"),
+            "com.apple.e5rt.e5bundlecache",
+            build,
+        )
+
+    def _has_valid_ane_artifacts(self, bundle_root: str) -> bool:
+        for root, dirs, files in os.walk(bundle_root):
+            if "weights1.bin" in files:
+                path = os.path.join(root, "weights1.bin")
+                if os.path.getsize(path) > 1_000_000:
+                    return True
+            if "model.anehash" in files:
+                return True
+            for name in files:
+                if name.endswith(".e5"):
+                    return True
+            if root.endswith(".bundle") and any(
+                name in dirs for name in ("main", "main_ane", "main_bnns", "foundInApp", "sentence_embed")
+            ):
+                return True
+            if root.endswith("H15S.bundle") and any(
+                name in dirs for name in ("main", "foundInApp", "sentence_embed")
+            ):
+                return True
+        return False
 
     def ane_cache_valid(self) -> bool:
         """True wenn ein vollständiger ANE-Bundle-Cache für das aktuelle macOS existiert."""
         if not self.use_gpu:
             return True
-        try:
-            build = subprocess.check_output(["sw_vers", "-buildVersion"], text=True).strip()
-        except Exception:
-            return False
-        cache_root = os.path.join(
-            os.path.expanduser("~/Library/Caches/whisper-server"),
-            "com.apple.e5rt.e5bundlecache",
-            build,
-        )
+        cache_root = self._cache_root()
         if not os.path.isdir(cache_root):
             return False
         for outer in os.listdir(cache_root):
             outer_path = os.path.join(cache_root, outer)
             if not os.path.isdir(outer_path):
                 continue
+            if self._has_valid_ane_artifacts(outer_path):
+                return True
             for bundle in os.listdir(outer_path):
                 if ".tmp." in bundle or not bundle.endswith(".bundle"):
                     continue
-                for root, _, files in os.walk(os.path.join(outer_path, bundle)):
-                    if "weights1.bin" in files:
-                        w = os.path.join(root, "weights1.bin")
-                        if os.path.getsize(w) > 1_000_000:
-                            return True
+                if self._has_valid_ane_artifacts(os.path.join(outer_path, bundle)):
+                    return True
         return False
 
     def _wait_until_ready(self, timeout: float | None = None):

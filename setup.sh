@@ -72,17 +72,35 @@ success "Python 3.11 gefunden ($PYTHON_BIN)"
 header "2 / 5  Modelle prüfen"
 # ══════════════════════════════════════════════════════════════════
 
-WHISPER_MODEL="$SCRIPT_DIR/models/whisper-cpp/ggml-large-v3-turbo.bin"
-WHISPER_COREML_DIR="$SCRIPT_DIR/models/whisper-cpp/ggml-large-v3-turbo-encoder.mlmodelc"
+mapfile -t WHISPER_MODELS < <(find "$SCRIPT_DIR/models/whisper-cpp" -maxdepth 1 -type f -name '*.bin' | sort)
+WHISPER_MODEL=""
+WHISPER_COREML_DIR=""
+if (( ${#WHISPER_MODELS[@]} == 1 )); then
+    WHISPER_MODEL="${WHISPER_MODELS[0]}"
+    WHISPER_STEM="$(basename "$WHISPER_MODEL" .bin)"
+    for suf in _q5_0 _q4_0 _q8_0 _q5_1 _q4_1 _q2_k _q3_k _q4_k _q5_k _q6_k; do
+        if [[ "$WHISPER_STEM" == *"$suf" ]]; then
+            WHISPER_STEM="${WHISPER_STEM%"$suf"}"
+            break
+        fi
+    done
+    WHISPER_COREML_DIR="$(dirname "$WHISPER_MODEL")/${WHISPER_STEM}-encoder.mlmodelc"
+fi
 WHISPER_SERVER_BIN="$SCRIPT_DIR/vendor/whisper.cpp-runtime/build/bin/whisper-server"
 LLM_DIR="$SCRIPT_DIR/models/llm"
 WHISPER_OK=false
 LLM_OK=false
 
 # whisper.cpp Runtime + Modell prüfen
-if [[ -f "$WHISPER_MODEL" && -d "$WHISPER_COREML_DIR" && -x "$WHISPER_SERVER_BIN" ]]; then
+if [[ -x "$WHISPER_SERVER_BIN" && -f "$WHISPER_MODEL" ]]; then
     WHISPER_OK=true
     success "whisper.cpp Runtime und Modell gefunden"
+    if [[ -d "$WHISPER_COREML_DIR" ]]; then
+        success "Passender CoreML-Encoder gefunden"
+    else
+        warn "Passender CoreML-Encoder fehlt – WhisperMac erzeugt ihn beim ersten Start automatisch, falls das Modell offiziell unterstützt wird."
+        echo -e "  Erwartet: $WHISPER_COREML_DIR"
+    fi
 else
     echo ""
     warn "whisper.cpp Runtime oder Modell fehlen im Projekt."
@@ -90,8 +108,12 @@ else
     echo -e "  ${BOLD}Erwartete Dateien:${RESET}"
     echo ""
     echo "  • $WHISPER_SERVER_BIN"
-    echo "  • $WHISPER_MODEL"
-    echo "  • $WHISPER_COREML_DIR"
+    echo "  • genau eine .bin in $SCRIPT_DIR/models/whisper-cpp/"
+    if (( ${#WHISPER_MODELS[@]} > 1 )); then
+        echo ""
+        warn "Mehr als eine .bin gefunden:"
+        printf '  • %s\n' "${WHISPER_MODELS[@]}"
+    fi
     echo ""
     read -p "  Ohne whisper.cpp Runtime fortfahren? (App startet dann nicht) [j/N] " -n 1 -r
     echo ""
