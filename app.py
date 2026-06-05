@@ -608,6 +608,7 @@ class WhisperMacApp(rumps.App):
         self.language         = self._load_setting("language", None, {c for c,_ in LANG_OPTIONS})
         self._translate_to    = self._load_setting("translate_to", None, {c for c,_ in TRANSLATE_OPTIONS})
         self._live_transcription = bool(self._load_raw_setting("live_transcription", True))
+        self._restore_live_transcription_after_translate = False
         self._ki_korrektur, ki_live_prompt, ki_auswahl_prompt = load_ki_settings()
         self.corrector.system_prompt = ki_live_prompt
         self._ki_auswahl_prompt      = ki_auswahl_prompt
@@ -760,6 +761,10 @@ class WhisperMacApp(rumps.App):
         self._translate_menu_items[self._translate_to]._menuitem.setState_(1)
         if self._live_transcription:
             self._live_item._menuitem.setState_(1)
+        if self._translate_to and self._live_transcription:
+            self._restore_live_transcription_after_translate = True
+            self._live_transcription = False
+            self._live_item._menuitem.setState_(0)
         self._apply_mic_menu_selection_state()
 
         # Dock-Icon aktivieren
@@ -2477,12 +2482,30 @@ end tell"""])
             self._translate_menu_items[code]._menuitem.setState_(0)
         for code, label in TRANSLATE_OPTIONS:
             if sender.title == label:
+                previous_translate_to = self._translate_to
                 self._translate_to = code
                 self._translate_menu_items[code]._menuitem.setState_(1)
+                if code:
+                    if not previous_translate_to:
+                        self._restore_live_transcription_after_translate = self._live_transcription
+                    if self._live_transcription:
+                        self._live_transcription = False
+                        self._live_item._menuitem.setState_(0)
+                else:
+                    if self._restore_live_transcription_after_translate:
+                        self._live_transcription = True
+                        self._live_item._menuitem.setState_(1)
+                    self._restore_live_transcription_after_translate = False
                 self._save_settings()
+                self._set_ui(status=self._ready_status())
                 break
 
     def _on_live_toggle(self, sender):
+        if self._translate_to and not self._live_transcription:
+            self._restore_live_transcription_after_translate = True
+            self._live_item._menuitem.setState_(0)
+            self._set_ui(status=self._ready_status())
+            return
         self._live_transcription = not self._live_transcription
         self._live_item._menuitem.setState_(1 if self._live_transcription else 0)
         self._save_settings()
