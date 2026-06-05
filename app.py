@@ -1702,22 +1702,50 @@ class WhisperMacApp(rumps.App):
         except Exception:
             return None
 
-    def _restore_clipboard_if_unchanged(self, pb, expected_text: str, saved_text):
+    def _snapshot_pasteboard(self, pb):
         try:
-            current = self._clipboard_string(pb)
-            if current != expected_text:
+            snapshot = []
+            for item in pb.pasteboardItems() or []:
+                item_snapshot = []
+                for pb_type in item.types() or []:
+                    data = item.dataForType_(pb_type)
+                    if data is None:
+                        continue
+                    item_snapshot.append((str(pb_type), AppKit.NSData.dataWithData_(data)))
+                snapshot.append(item_snapshot)
+            return snapshot
+        except Exception as e:
+            logging.debug(f"Pasteboard-Snapshot fehlgeschlagen: {e}")
+            return None
+
+    def _restore_pasteboard(self, pb, snapshot):
+        pb.clearContents()
+        if snapshot is None:
+            return
+        items = []
+        for item_snapshot in snapshot:
+            item = AppKit.NSPasteboardItem.alloc().init()
+            for pb_type, data in item_snapshot:
+                if data is not None:
+                    item.setData_forType_(data, pb_type)
+            items.append(item)
+        if items:
+            pb.writeObjects_(items)
+
+    def _restore_clipboard_if_unchanged(self, pb, expected_change_count: int, saved_snapshot):
+        try:
+            if int(pb.changeCount()) != expected_change_count:
                 return
-            pb.clearContents()
-            if saved_text:
-                pb.setString_forType_(saved_text, AppKit.NSPasteboardTypeString)
+            self._restore_pasteboard(pb, saved_snapshot)
         except Exception as e:
             logging.debug(f"Clipboard-Wiederherstellung fehlgeschlagen: {e}")
 
     def _paste_plain_text(self, text: str, pb) -> bool:
         try:
-            saved_text = self._clipboard_string(pb)
+            saved_snapshot = self._snapshot_pasteboard(pb)
             pb.clearContents()
             pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+            whisper_change_count = int(pb.changeCount())
             time.sleep(0.02)
             # Cmd+V direkt via CGEvent – gleiche HID-Pipeline wie alle anderen Key-Events.
             # Funktioniert zuverlässig in iFrames und Browser-Editoren, wo osascript versagt.
@@ -1729,7 +1757,7 @@ class WhisperMacApp(rumps.App):
             CGEventPost(kCGHIDEventTap, up)
             def _restore():
                 time.sleep(0.12)
-                self._restore_clipboard_if_unchanged(pb, text, saved_text)
+                self._restore_clipboard_if_unchanged(pb, whisper_change_count, saved_snapshot)
             threading.Thread(target=_restore, daemon=True).start()
             return True
         except Exception as e:
@@ -1830,10 +1858,11 @@ class WhisperMacApp(rumps.App):
 
     def _insert_text(self, text: str):
         pb = AppKit.NSPasteboard.generalPasteboard()
-        old_text = self._clipboard_string(pb)
+        saved_snapshot = self._snapshot_pasteboard(pb)
 
         pb.clearContents()
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+        whisper_change_count = int(pb.changeCount())
 
         time.sleep(0.02)
         down = CGEventCreateKeyboardEvent(None, 9, True)   # Cmd+V
@@ -1845,7 +1874,7 @@ class WhisperMacApp(rumps.App):
 
         def _restore():
             time.sleep(0.12)
-            self._restore_clipboard_if_unchanged(pb, text, old_text)
+            self._restore_clipboard_if_unchanged(pb, whisper_change_count, saved_snapshot)
         threading.Thread(target=_restore, daemon=True).start()
 
     # ── Verlauf ───────────────────────────────────────────────────────────
