@@ -189,6 +189,21 @@ class _CoreAudioPropertyAddress(ctypes.Structure):
     ]
 
 
+class _CoreAudioBuffer(ctypes.Structure):
+    _fields_ = [
+        ("mNumberChannels", ctypes.c_uint32),
+        ("mDataByteSize", ctypes.c_uint32),
+        ("mData", ctypes.c_void_p),
+    ]
+
+
+class _CoreAudioBufferList(ctypes.Structure):
+    _fields_ = [
+        ("mNumberBuffers", ctypes.c_uint32),
+        ("mBuffers", _CoreAudioBuffer * 1),
+    ]
+
+
 def _coreaudio_lib():
     global _COREAUDIO_LIB
     if _COREAUDIO_LIB is None:
@@ -205,51 +220,181 @@ def _coreaudio_lib():
             ctypes.c_void_p,
         ]
         lib.AudioObjectGetPropertyData.restype = ctypes.c_int32
+        lib.AudioObjectGetPropertyDataSize.argtypes = [
+            ctypes.c_uint32,
+            ctypes.POINTER(_CoreAudioPropertyAddress),
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        lib.AudioObjectGetPropertyDataSize.restype = ctypes.c_int32
         _COREAUDIO_LIB = lib
     return _COREAUDIO_LIB
 
 
 _CA_SYSTEM_OBJECT = 1
+_CA_PROP_DEVICES = 1684370979
 _CA_PROP_DEFAULT_INPUT_DEVICE = 1682533920
 _CA_PROP_NAME = 1819173229
 _CA_SCOPE_GLOBAL = 1735159650
+_CA_SCOPE_INPUT = 1768845428
 _CA_ELEMENT_MAIN = 0
+_CA_PROP_STREAM_CONFIGURATION = 1935894119
+
+
+def _get_coreaudio_cfstring_property(
+    object_id: int,
+    selector: int,
+    scope: int = _CA_SCOPE_GLOBAL,
+    element: int = _CA_ELEMENT_MAIN,
+) -> str | None:
+    coreaudio = _coreaudio_lib()
+    addr = _CoreAudioPropertyAddress(selector, scope, element)
+    size = ctypes.c_uint32(ctypes.sizeof(ctypes.c_void_p))
+    cf_value = ctypes.c_void_p()
+    status = coreaudio.AudioObjectGetPropertyData(
+        object_id,
+        ctypes.byref(addr),
+        0,
+        None,
+        ctypes.byref(size),
+        ctypes.byref(cf_value),
+    )
+    if status != 0 or not cf_value.value:
+        return None
+    try:
+        return str(objc.objc_object(c_void_p=cf_value.value))
+    except Exception:
+        return None
+
+
+def _coreaudio_device_has_input(device_id: int) -> bool:
+    coreaudio = _coreaudio_lib()
+    addr = _CoreAudioPropertyAddress(
+        _CA_PROP_STREAM_CONFIGURATION,
+        _CA_SCOPE_INPUT,
+        _CA_ELEMENT_MAIN,
+    )
+    size = ctypes.c_uint32()
+    status = coreaudio.AudioObjectGetPropertyDataSize(
+        device_id,
+        ctypes.byref(addr),
+        0,
+        None,
+        ctypes.byref(size),
+    )
+    if status != 0 or size.value < ctypes.sizeof(ctypes.c_uint32):
+        return False
+
+    raw = (ctypes.c_ubyte * size.value)()
+    status = coreaudio.AudioObjectGetPropertyData(
+        device_id,
+        ctypes.byref(addr),
+        0,
+        None,
+        ctypes.byref(size),
+        ctypes.byref(raw),
+    )
+    if status != 0:
+        return False
+
+    buffer_list = ctypes.cast(
+        ctypes.byref(raw),
+        ctypes.POINTER(_CoreAudioBufferList),
+    ).contents
+    buffer_count = int(buffer_list.mNumberBuffers)
+    if buffer_count <= 0:
+        return False
+
+    buffers_type = _CoreAudioBuffer * buffer_count
+    buffers = ctypes.cast(
+        ctypes.byref(raw, _CoreAudioBufferList.mBuffers.offset),
+        ctypes.POINTER(buffers_type),
+    ).contents
+    return any(buf.mNumberChannels > 0 for buf in buffers)
+
+
+def _list_coreaudio_input_device_names() -> list[str]:
+    coreaudio = _coreaudio_lib()
+    addr = _CoreAudioPropertyAddress(
+        _CA_PROP_DEVICES,
+        _CA_SCOPE_GLOBAL,
+        _CA_ELEMENT_MAIN,
+    )
+    size = ctypes.c_uint32()
+    status = coreaudio.AudioObjectGetPropertyDataSize(
+        _CA_SYSTEM_OBJECT,
+        ctypes.byref(addr),
+        0,
+        None,
+        ctypes.byref(size),
+    )
+    if status != 0 or size.value < ctypes.sizeof(ctypes.c_uint32):
+        return []
+
+    count = size.value // ctypes.sizeof(ctypes.c_uint32)
+    device_ids = (ctypes.c_uint32 * count)()
+    status = coreaudio.AudioObjectGetPropertyData(
+        _CA_SYSTEM_OBJECT,
+        ctypes.byref(addr),
+        0,
+        None,
+        ctypes.byref(size),
+        ctypes.byref(device_ids),
+    )
+    if status != 0:
+        return []
+
+    result: list[str] = []
+    for i in range(count):
+        device_id = int(device_ids[i])
+        if device_id <= 0 or not _coreaudio_device_has_input(device_id):
+            continue
+        name = _normalize_device_name(
+            _get_coreaudio_cfstring_property(device_id, _CA_PROP_NAME) or ""
+        )
+        if name:
+            result.append(name)
+    return result
 
 
 def _list_input_devices():
     """Gibt Liste von (index, name) aller Mikrofon-Geräte zurück.
 
-    Nutzt AVFoundation für die Geräteliste (kein Cache, immer aktuell) und
-    sounddevice für die Aufnahme-Indizes. Wenn PortAudio ein Gerät noch nicht
-    kennt, wird idx=None zurückgegeben → Aufnahme läuft dann über System-Standard.
+    Nutzt CoreAudio als Quelle der tatsächlich in macOS verfügbaren Eingabegeräte
+    und sounddevice/PortAudio nur zur Auflösung der Recorder-Indizes. Wenn
+    PortAudio ein Gerät noch nicht kennt, wird idx=None zurückgegeben.
     """
-    # sounddevice-Indizes (PortAudio, ggf. veraltet bei neuen BT-Geräten)
     sd_map: dict[str, int] = {}
     for i, d in enumerate(sd.query_devices()):
         if d["max_input_channels"] > 0:
-            sd_map[d["name"]] = i
-    # AVFoundation: immer frische Geräteliste direkt aus macOS
+            sd_map[_normalize_device_name(d["name"])] = i
+
     try:
-        from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
-        av_names = [
-            str(d.localizedName())
-            for d in AVCaptureDevice.devicesWithMediaType_(AVMediaTypeAudio)
-        ]
+        coreaudio_names = _list_coreaudio_input_device_names()
     except Exception:
-        return [(idx, name) for name, idx in sd_map.items()]
-    if not av_names:
+        coreaudio_names = []
+    if not coreaudio_names:
         return [(idx, name) for name, idx in sd_map.items()]
 
     result = []
-    for name in av_names:
+    seen: set[str] = set()
+    for raw_name in coreaudio_names:
+        name = _normalize_device_name(raw_name)
+        if not name or name in seen:
+            continue
+        seen.add(name)
         idx = sd_map.get(name)
         if idx is None:
-            # Teilübereinstimmung (PortAudio kürzt manchmal lange Namen)
             for sd_name, sd_idx in sd_map.items():
                 if name in sd_name or sd_name in name:
                     idx = sd_idx
                     break
         result.append((idx, name))
+
+    for sd_name, sd_idx in sd_map.items():
+        if sd_name not in seen:
+            result.append((sd_idx, sd_name))
     return result
 
 
@@ -370,7 +515,7 @@ class _AppMenuDelegate(AppKit.NSObject):
     def menuWillOpen_(self, menu):
         if hasattr(self, '_app'):
             self._app._menu_is_open = True
-            self._app._apply_mic_menu_selection_state()
+            self._app._refresh_mic_menu()
 
     def menuDidClose_(self, menu):
         if hasattr(self, '_app'):
@@ -1887,28 +2032,7 @@ end tell"""])
         if status != 0 or size.value < 4 or device_id.value == 0:
             return None, None
 
-        name_addr = _CoreAudioPropertyAddress(
-            _CA_PROP_NAME,
-            _CA_SCOPE_GLOBAL,
-            _CA_ELEMENT_MAIN,
-        )
-        name_size = ctypes.c_uint32(ctypes.sizeof(ctypes.c_void_p))
-        cf_name = ctypes.c_void_p()
-        status = coreaudio.AudioObjectGetPropertyData(
-            device_id.value,
-            ctypes.byref(name_addr),
-            0,
-            None,
-            ctypes.byref(name_size),
-            ctypes.byref(cf_name),
-        )
-        if status != 0 or not cf_name.value:
-            return device_id.value, None
-
-        try:
-            name = str(objc.objc_object(c_void_p=cf_name.value))
-        except Exception:
-            name = None
+        name = _get_coreaudio_cfstring_property(device_id.value, _CA_PROP_NAME)
         return device_id.value, name
 
     def _start_system_mic_sync(self):
@@ -2049,6 +2173,8 @@ end tell"""])
             return
         import collections as _co
         try:
+            previous_signature = self._last_input_devices_signature
+            previous_default_id = self._last_system_input_device_id
             if not self._is_recording:
                 try:
                     sd._terminate()
@@ -2094,10 +2220,17 @@ end tell"""])
                         self._mic_device_name = None
                         self._mic_device_idx  = None
 
-            self._last_system_input_device_id = self._get_system_default_input_device_id()
-            self._last_input_devices_signature = tuple(sorted(current.items()))
+            current_default_id = self._get_system_default_input_device_id()
+            current_signature = tuple(sorted(current.items()))
+            devices_changed = current_signature != previous_signature
+            default_changed = current_default_id != previous_default_id
+
+            self._last_system_input_device_id = current_default_id
+            self._last_input_devices_signature = current_signature
             self._apply_mic_menu_selection_state()
-            self._schedule_recorder_rebind("Mikrofonliste geändert", force=True)
+            if devices_changed or (self._mic_follow_system and default_changed):
+                reason = "Mikrofonliste geändert" if devices_changed else "System-Mikrofon geändert"
+                self._schedule_recorder_rebind(reason, force=devices_changed)
         finally:
             self._mic_refresh_lock.release()
 
