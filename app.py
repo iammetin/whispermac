@@ -1696,8 +1696,26 @@ class WhisperMacApp(rumps.App):
             logging.debug(f"AX insert exception: {e}")
         return False
 
+    def _clipboard_string(self, pb):
+        try:
+            return pb.stringForType_(AppKit.NSPasteboardTypeString)
+        except Exception:
+            return None
+
+    def _restore_clipboard_if_unchanged(self, pb, expected_text: str, saved_text):
+        try:
+            current = self._clipboard_string(pb)
+            if current != expected_text:
+                return
+            pb.clearContents()
+            if saved_text:
+                pb.setString_forType_(saved_text, AppKit.NSPasteboardTypeString)
+        except Exception as e:
+            logging.debug(f"Clipboard-Wiederherstellung fehlgeschlagen: {e}")
+
     def _paste_plain_text(self, text: str, pb) -> bool:
         try:
+            saved_text = self._clipboard_string(pb)
             pb.clearContents()
             pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
             time.sleep(0.02)
@@ -1709,6 +1727,10 @@ class WhisperMacApp(rumps.App):
             up = CGEventCreateKeyboardEvent(None, 9, False)
             CGEventSetFlags(up, kCGEventFlagMaskCommand)
             CGEventPost(kCGHIDEventTap, up)
+            def _restore():
+                time.sleep(0.12)
+                self._restore_clipboard_if_unchanged(pb, text, saved_text)
+            threading.Thread(target=_restore, daemon=True).start()
             return True
         except Exception as e:
             logging.exception(f"Paste fehlgeschlagen: {e}")
@@ -1721,7 +1743,6 @@ class WhisperMacApp(rumps.App):
         shortcuts = load_shortcuts()
 
         pb      = AppKit.NSPasteboard.generalPasteboard()
-        saved   = pb.stringForType_(AppKit.NSPasteboardTypeString)
         inserted_any = False
 
         # Smartes Leerzeichen + Großschreibung: vor dem ersten Segment prüfen
@@ -1805,18 +1826,11 @@ class WhisperMacApp(rumps.App):
             self._last_insert_ends_with_word     = last_seg[-1] not in (" ", "\n", "\t", "\r")
             self._last_insert_ends_with_sentence = last_seg[-1] in (".", "!", "?")
 
-        if saved:
-            def _restore_clipboard(s=saved):
-                time.sleep(1.0)
-                pb.clearContents()
-                pb.setString_forType_(s, AppKit.NSPasteboardTypeString)
-            threading.Thread(target=_restore_clipboard, daemon=True).start()
-
         return inserted_any or not text.strip()
 
     def _insert_text(self, text: str):
         pb = AppKit.NSPasteboard.generalPasteboard()
-        old_text = pb.stringForType_(AppKit.NSPasteboardTypeString)
+        old_text = self._clipboard_string(pb)
 
         pb.clearContents()
         pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
@@ -1829,10 +1843,10 @@ class WhisperMacApp(rumps.App):
         CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, up)
 
-        if old_text:
-            time.sleep(0.35)
-            pb.clearContents()
-            pb.setString_forType_(old_text, AppKit.NSPasteboardTypeString)
+        def _restore():
+            time.sleep(0.12)
+            self._restore_clipboard_if_unchanged(pb, text, old_text)
+        threading.Thread(target=_restore, daemon=True).start()
 
     # ── Verlauf ───────────────────────────────────────────────────────────
 
