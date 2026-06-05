@@ -276,56 +276,88 @@ class Transcriber:
         stem = os.path.basename(self.model_path)
         if stem.endswith(".bin"):
             stem = stem[:-4]
-        for suf in ("_q5_0", "_q4_0", "_q8_0", "_q5_1", "_q4_1",
-                    "_q2_k", "_q3_k", "_q4_k", "_q5_k", "_q6_k"):
-            if stem.endswith(suf):
-                stem = stem[:-len(suf)]
+        for suffix in ("q5_0", "q4_0", "q8_0", "q5_1", "q4_1",
+                       "q2_k", "q3_k", "q4_k", "q5_k", "q6_k"):
+            matched = False
+            for sep in ("_", "-"):
+                suf = sep + suffix
+                if stem.endswith(suf):
+                    stem = stem[:-len(suf)]
+                    matched = True
+                    break
+            if matched:
                 break
         return os.path.join(os.path.dirname(self.model_path), stem + "-encoder.mlmodelc")
 
+    def _legacy_encoder_path(self) -> str:
+        stem = os.path.basename(self.model_path)
+        if stem.endswith(".bin"):
+            stem = stem[:-4]
+        return os.path.join(os.path.dirname(self.model_path), stem + "-encoder.mlmodelc")
+
+    def _migrate_legacy_encoder_name(self) -> None:
+        expected = self._encoder_path()
+        legacy = self._legacy_encoder_path()
+        if expected == legacy or os.path.exists(expected) or not os.path.isdir(legacy):
+            return
+        try:
+            os.rename(legacy, expected)
+            logging.info("CoreML-Encoder umbenannt: %s -> %s", legacy, expected)
+        except Exception as e:
+            logging.warning("CoreML-Encoder konnte nicht umbenannt werden (%s -> %s): %s", legacy, expected, e)
+
     def _coreml_conversion_model_name(self) -> str | None:
-        stem = os.path.basename(self._encoder_path())
-        if stem.endswith("-encoder.mlmodelc"):
-            stem = stem[:-len("-encoder.mlmodelc")]
+        stem = os.path.basename(self.model_path).lower()
+        if stem.endswith(".bin"):
+            stem = stem[:-4]
+        for suffix in ("q5_0", "q4_0", "q8_0", "q5_1", "q4_1",
+                       "q2_k", "q3_k", "q4_k", "q5_k", "q6_k"):
+            matched = False
+            for sep in ("_", "-"):
+                suf = sep + suffix
+                if stem.endswith(suf):
+                    stem = stem[:-len(suf)]
+                    matched = True
+                    break
+            if matched:
+                break
         if stem.startswith("ggml-"):
             stem = stem[5:]
-        aliases = {
-            "large": "large-v3",
-            "turbo": "large-v3-turbo",
-        }
-        supported = {
-            "tiny",
-            "tiny.en",
-            "base",
-            "base.en",
-            "small",
-            "small.en",
-            "small.en-tdrz",
-            "medium",
-            "medium.en",
-            "large-v1",
-            "large-v2",
-            "large-v3",
+        normalized = stem.replace("_", "-")
+        for candidate in (
             "large-v3-turbo",
-        }
-        stem = aliases.get(stem, stem)
-        return stem if stem in supported else None
+            "large-v3",
+            "large-v2",
+            "large-v1",
+            "medium.en",
+            "medium",
+            "small.en-tdrz",
+            "small.en",
+            "small",
+            "base.en",
+            "base",
+            "tiny.en",
+            "tiny",
+            "large",
+            "turbo",
+        ):
+            if candidate in normalized:
+                if candidate == "large":
+                    return "large-v3"
+                if candidate == "turbo":
+                    return "large-v3-turbo"
+                return candidate
+        return "large-v3-turbo"
 
     def needs_coreml_encoder_generation(self) -> bool:
-        return self.use_gpu and not os.path.isdir(self._encoder_path()) and self._coreml_conversion_model_name() is not None
+        return self.use_gpu and not os.path.isdir(self._encoder_path())
 
     def _ensure_coreml_encoder(self) -> None:
+        self._migrate_legacy_encoder_name()
         if not self.use_gpu or os.path.isdir(self._encoder_path()):
             return
 
         model_name = self._coreml_conversion_model_name()
-        if not model_name:
-            logging.warning(
-                "Kein Auto-Build fuer CoreML-Encoder moeglich: Modell %s wird nicht offiziell unterstuetzt",
-                self.model_path,
-            )
-            return
-
         script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "generate_coreml_encoder.py")
         if not os.path.isfile(script_path):
             logging.warning("CoreML-Generator-Skript fehlt: %s", script_path)

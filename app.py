@@ -102,10 +102,16 @@ def _normalized_encoder_stem(model_path: str) -> str:
     stem = os.path.basename(model_path)
     if stem.endswith(".bin"):
         stem = stem[:-4]
-    for suf in ("_q5_0", "_q4_0", "_q8_0", "_q5_1", "_q4_1",
-                "_q2_k", "_q3_k", "_q4_k", "_q5_k", "_q6_k"):
-        if stem.endswith(suf):
-            stem = stem[:-len(suf)]
+    for suffix in ("q5_0", "q4_0", "q8_0", "q5_1", "q4_1",
+                   "q2_k", "q3_k", "q4_k", "q5_k", "q6_k"):
+        matched = False
+        for sep in ("_", "-"):
+            suf = sep + suffix
+            if stem.endswith(suf):
+                stem = stem[:-len(suf)]
+                matched = True
+                break
+        if matched:
             break
     return stem
 
@@ -130,6 +136,25 @@ def _discover_model_path(models_dir: str) -> str:
 def _expected_encoder_path(model_path: str) -> str:
     stem = _normalized_encoder_stem(model_path)
     return os.path.join(os.path.dirname(model_path), stem + "-encoder.mlmodelc")
+
+
+def _legacy_encoder_path(model_path: str) -> str:
+    stem = os.path.basename(model_path)
+    if stem.endswith(".bin"):
+        stem = stem[:-4]
+    return os.path.join(os.path.dirname(model_path), stem + "-encoder.mlmodelc")
+
+
+def _migrate_legacy_encoder_name(model_path: str) -> None:
+    expected = _expected_encoder_path(model_path)
+    legacy = _legacy_encoder_path(model_path)
+    if expected == legacy or os.path.exists(expected) or not os.path.isdir(legacy):
+        return
+    try:
+        os.rename(legacy, expected)
+        logging.info("CoreML-Encoder umbenannt: %s -> %s", legacy, expected)
+    except Exception as e:
+        logging.warning("CoreML-Encoder konnte nicht umbenannt werden (%s -> %s): %s", legacy, expected, e)
 
 
 def _restore_default_coreml_cache_dir() -> None:
@@ -160,6 +185,7 @@ def _restore_default_coreml_cache_dir() -> None:
 
 
 MODEL_PATH = _require_file(_discover_model_path(_MODELS_DIR), "Whisper-Modell")
+_migrate_legacy_encoder_name(MODEL_PATH)
 COREML_ENCODER_PATH = _expected_encoder_path(MODEL_PATH)
 _restore_default_coreml_cache_dir()
 logging.info(f"Whisper-Modell automatisch erkannt: {MODEL_PATH}")

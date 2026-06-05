@@ -92,7 +92,7 @@ models/whisper-cpp/<matching-model>-encoder.mlmodelc/
 
 Keep exactly one `.bin` in `models/whisper-cpp/`. WhisperMac derives the matching `-encoder.mlmodelc` from that filename automatically.
 
-If the matching encoder is missing, WhisperMac now tries to generate it automatically on first start using the official `whisper.cpp` Core ML workflow. This works for the standard Whisper model names supported by `whisper.cpp`.
+If the matching encoder is missing, WhisperMac now generates it automatically on first start. It inspects the `.bin` filename for supported Whisper base variants such as `large-v3-turbo`, `large-v3`, `medium`, `small`, `base`, or `tiny`, and uses the best match as the CoreML source model.
 
 #### 4. Build and run
 

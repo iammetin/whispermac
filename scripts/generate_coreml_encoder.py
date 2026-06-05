@@ -6,10 +6,9 @@ This follows the official whisper.cpp CoreML path:
 2. Compile it via `xcrun coremlc`
 3. Store the result next to the .bin as `<model>-encoder.mlmodelc`
 
-Important limitation:
-- This only works for model names supported by the official whisper.cpp
-  CoreML conversion script. A random custom/fine-tuned ggml .bin cannot be
-  reconstructed from the .bin alone.
+The script derives the most likely official Whisper base model from the local
+`.bin` filename and uses that as the CoreML source model. The generated
+encoder is still stored next to the local `.bin` using that file's own name.
 """
 
 from __future__ import annotations
@@ -40,36 +39,34 @@ from whisper.model import (
 )
 
 
-SUPPORTED_MODELS = {
-    "tiny",
-    "tiny.en",
-    "base",
-    "base.en",
-    "small",
-    "small.en",
-    "small.en-tdrz",
-    "medium",
-    "medium.en",
-    "large-v1",
-    "large-v2",
-    "large-v3",
+SUPPORTED_SOURCE_MODELS = [
     "large-v3-turbo",
-}
-MODEL_ALIASES = {
-    "large": "large-v3",
-    "turbo": "large-v3-turbo",
-}
+    "large-v3",
+    "large-v2",
+    "large-v1",
+    "medium.en",
+    "medium",
+    "small.en-tdrz",
+    "small.en",
+    "small",
+    "base.en",
+    "base",
+    "tiny.en",
+    "tiny",
+    "large",
+    "turbo",
+]
 QUANT_SUFFIXES = (
-    "_q5_0",
-    "_q4_0",
-    "_q8_0",
-    "_q5_1",
-    "_q4_1",
-    "_q2_k",
-    "_q3_k",
-    "_q4_k",
-    "_q5_k",
-    "_q6_k",
+    "q5_0",
+    "q4_0",
+    "q8_0",
+    "q5_1",
+    "q4_1",
+    "q2_k",
+    "q3_k",
+    "q4_k",
+    "q5_k",
+    "q6_k",
 )
 
 
@@ -82,20 +79,31 @@ def _normalized_stem_from_model_bin(model_bin: Path) -> str:
     if stem.endswith(".bin"):
         stem = stem[:-4]
     for suffix in QUANT_SUFFIXES:
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
+        matched = False
+        for sep in ("_", "-"):
+            suf = sep + suffix
+            if stem.endswith(suf):
+                stem = stem[: -len(suf)]
+                matched = True
+                break
+        if matched:
             break
     return stem
 
 
 def derive_upstream_model_name(model_bin: Path) -> Optional[str]:
-    stem = _normalized_stem_from_model_bin(model_bin)
+    stem = _normalized_stem_from_model_bin(model_bin).lower()
     if stem.startswith("ggml-"):
         stem = stem[5:]
-    stem = MODEL_ALIASES.get(stem, stem)
-    if stem in SUPPORTED_MODELS:
-        return stem
-    return None
+    normalized = stem.replace("_", "-")
+    for candidate in SUPPORTED_SOURCE_MODELS:
+        if candidate in normalized:
+            if candidate == "large":
+                return "large-v3"
+            if candidate == "turbo":
+                return "large-v3-turbo"
+            return candidate
+    return "large-v3-turbo"
 
 
 def expected_encoder_path(model_bin: Path) -> Path:
@@ -290,11 +298,6 @@ def main() -> int:
         return 0
 
     model_name = derive_upstream_model_name(model_bin)
-    if not model_name:
-        raise RuntimeError(
-            "Kein automatischer CoreML-Build fuer dieses Modell moeglich. "
-            f"Unterstuetzt sind nur offizielle Whisper-Modelle: {', '.join(sorted(SUPPORTED_MODELS))}"
-        )
 
     output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else model_bin.parent
     output_dir.mkdir(parents=True, exist_ok=True)
