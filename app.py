@@ -314,7 +314,7 @@ def _coreaudio_device_has_input(device_id: int) -> bool:
     return any(buf.mNumberChannels > 0 for buf in buffers)
 
 
-def _list_coreaudio_input_device_names() -> list[str]:
+def _list_coreaudio_input_devices() -> list[tuple[int, str]]:
     coreaudio = _coreaudio_lib()
     addr = _CoreAudioPropertyAddress(
         _CA_PROP_DEVICES,
@@ -345,7 +345,7 @@ def _list_coreaudio_input_device_names() -> list[str]:
     if status != 0:
         return []
 
-    result: list[str] = []
+    result: list[tuple[int, str]] = []
     for i in range(count):
         device_id = int(device_ids[i])
         if device_id <= 0 or not _coreaudio_device_has_input(device_id):
@@ -354,12 +354,12 @@ def _list_coreaudio_input_device_names() -> list[str]:
             _get_coreaudio_cfstring_property(device_id, _CA_PROP_NAME) or ""
         )
         if name:
-            result.append(name)
+            result.append((device_id, name))
     return result
 
 
 def _list_input_devices():
-    """Gibt Liste von (index, name) aller Mikrofon-Geräte zurück.
+    """Gibt Liste von (device_id, index, name) aller Mikrofon-Geräte zurück.
 
     Nutzt CoreAudio als Quelle der tatsächlich in macOS verfügbaren Eingabegeräte
     und sounddevice/PortAudio nur zur Auflösung der Recorder-Indizes. Wenn
@@ -371,15 +371,15 @@ def _list_input_devices():
             sd_map[_normalize_device_name(d["name"])] = i
 
     try:
-        coreaudio_names = _list_coreaudio_input_device_names()
+        coreaudio_devices = _list_coreaudio_input_devices()
     except Exception:
-        coreaudio_names = []
-    if not coreaudio_names:
-        return [(idx, name) for name, idx in sd_map.items()]
+        coreaudio_devices = []
+    if not coreaudio_devices:
+        return [(None, idx, name) for name, idx in sd_map.items()]
 
     result = []
     seen: set[str] = set()
-    for raw_name in coreaudio_names:
+    for device_id, raw_name in coreaudio_devices:
         name = _normalize_device_name(raw_name)
         if not name or name in seen:
             continue
@@ -390,11 +390,11 @@ def _list_input_devices():
                 if name in sd_name or sd_name in name:
                     idx = sd_idx
                     break
-        result.append((idx, name))
+        result.append((device_id, idx, name))
 
     for sd_name, sd_idx in sd_map.items():
         if sd_name not in seen:
-            result.append((sd_idx, sd_name))
+            result.append((None, sd_idx, sd_name))
     return result
 
 
@@ -402,22 +402,31 @@ def _normalize_device_name(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "").strip())
 
 
-def _dedupe_input_devices(devices: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
+def _dedupe_input_devices(
+    devices: list[tuple[int | None, int | None, str]]
+) -> list[tuple[int | None, int | None, str]]:
     seen: set[str] = set()
-    result: list[tuple[int | None, str]] = []
-    for idx, raw_name in devices:
+    result: list[tuple[int | None, int | None, str]] = []
+    for device_id, idx, raw_name in devices:
         name = _normalize_device_name(raw_name)
         if not name or name == "System (Standard)" or name in seen:
             continue
         seen.add(name)
-        result.append((idx, name))
+        result.append((device_id, idx, name))
     return result
 
 
-def _input_devices_signature(devices: list[tuple[int | None, str]] | None = None) -> tuple[tuple[str, int | None], ...]:
+def _input_devices_signature(
+    devices: list[tuple[int | None, int | None, str]] | None = None
+) -> tuple[tuple[str, int | None, int | None], ...]:
     if devices is None:
         devices = _dedupe_input_devices(_list_input_devices())
-    return tuple(sorted((_normalize_device_name(name), idx) for idx, name in devices))
+    return tuple(
+        sorted(
+            (_normalize_device_name(name), device_id, idx)
+            for device_id, idx, name in devices
+        )
+    )
 
 
 class _TranscriptionSpinner:
@@ -628,9 +637,9 @@ class WhisperMacApp(rumps.App):
         # ── Mikrofon (inline im Hauptmenü) ───────────────────────────────
         self._mic_header = rumps.MenuItem("Mikrofon:")
         self._mic_header.set_callback(None)
-        self._mic_menu_items = {}  # name -> (index, MenuItem)
+        self._mic_menu_items = {}  # name -> (device_id, index, MenuItem)
         default_item = rumps.MenuItem("System (Standard)", callback=self._on_mic_select)
-        self._mic_menu_items["System (Standard)"] = (None, default_item)
+        self._mic_menu_items["System (Standard)"] = (None, None, default_item)
         _initial_mic_items = [default_item]
 
         # PortAudio-Cache leeren damit beim Start bereits angeschlossene
@@ -642,9 +651,9 @@ class WhisperMacApp(rumps.App):
             pass
 
         _initial_input_devices = _dedupe_input_devices(_list_input_devices())
-        for idx, name in _initial_input_devices:
+        for device_id, idx, name in _initial_input_devices:
             item = rumps.MenuItem(name, callback=self._on_mic_select)
-            self._mic_menu_items[name] = (idx, item)
+            self._mic_menu_items[name] = (device_id, idx, item)
             if name == self._mic_device_name:
                 self._mic_device_idx = idx
             _initial_mic_items.append(item)
@@ -2095,7 +2104,54 @@ end tell"""])
             logging.debug(f"PortAudio-Default-Mikrofon konnte nicht gelesen werden: {e}")
             return None
 
+    def _rebuild_mic_menu_section(self, current: dict[str, tuple[int | None, int | None]]):
+        for name in list(self._mic_menu_items.keys()):
+            if name == "System (Standard)":
+                continue
+            if name in self.menu:
+                del self.menu[name]
+            del self._mic_menu_items[name]
+
+        insert_after_key = "System (Standard)"
+        for name, (device_id, idx) in current.items():
+            item = rumps.MenuItem(name, callback=self._on_mic_select)
+            self.menu.insert_after(insert_after_key, item)
+            self._mic_menu_items[name] = (device_id, idx, item)
+            if name == self._mic_device_name:
+                self._mic_device_idx = idx
+            insert_after_key = name
+
+    def _purge_duplicate_mic_menu_titles(self):
+        ns_menu = self.menu._menu
+        header_index = ns_menu.indexOfItem_(self._mic_header._menuitem)
+        lang_index = ns_menu.indexOfItem_(self._lang_submenu._menuitem)
+        if header_index < 0 or lang_index < 0 or lang_index <= header_index:
+            return
+
+        seen_titles: set[str] = set()
+        remove_indices: list[int] = []
+        for idx in range(header_index + 1, lang_index):
+            item = ns_menu.itemAtIndex_(idx)
+            title = _normalize_device_name(str(item.title() or ""))
+            if not title:
+                continue
+            if title in seen_titles:
+                remove_indices.append(idx)
+                continue
+            seen_titles.add(title)
+
+        for idx in reversed(remove_indices):
+            ns_menu.removeItemAtIndex_(idx)
+
     def _get_current_system_mic_name(self):
+        current_id = self._get_system_default_input_device_id()
+        if current_id is not None:
+            for name, (device_id, _, _) in self._mic_menu_items.items():
+                if name == "System (Standard)":
+                    continue
+                if device_id == current_id:
+                    return name
+
         _, system_name = self._get_system_default_input_device_info()
         if system_name:
             if system_name in self._mic_menu_items:
@@ -2110,7 +2166,7 @@ end tell"""])
 
         idx = self._get_portaudio_default_input_index()
         if idx is not None:
-            for name, (device_idx, _) in self._mic_menu_items.items():
+            for name, (_, device_idx, _) in self._mic_menu_items.items():
                 if name == "System (Standard)":
                     continue
                 if device_idx == idx:
@@ -2122,19 +2178,19 @@ end tell"""])
             current_name = self._get_current_system_mic_name()
             if current_name and current_name in self._mic_menu_items:
                 self._last_system_mic_name = current_name
-                device_idx, _ = self._mic_menu_items[current_name]
+                _, device_idx, _ = self._mic_menu_items[current_name]
                 return current_name, device_idx
             if (
                 self._last_system_mic_name
                 and self._last_system_mic_name in self._mic_menu_items
             ):
-                device_idx, _ = self._mic_menu_items[self._last_system_mic_name]
+                _, device_idx, _ = self._mic_menu_items[self._last_system_mic_name]
                 return self._last_system_mic_name, device_idx
             return "System (Standard)", None
 
         selected_name = self._mic_device_name or "System (Standard)"
         if selected_name in self._mic_menu_items:
-            device_idx, _ = self._mic_menu_items[selected_name]
+            _, device_idx, _ = self._mic_menu_items[selected_name]
             return selected_name, device_idx
         return "System (Standard)", None
 
@@ -2147,14 +2203,14 @@ end tell"""])
         return selected_device_idx
 
     def _apply_mic_menu_selection_state(self):
-        for _, item in self._mic_menu_items.values():
+        for _, _, item in self._mic_menu_items.values():
             item._menuitem.setState_(0)
 
         selected_name, device_idx = self._get_selected_mic_target()
         if selected_name in self._mic_menu_items:
-            self._mic_menu_items[selected_name][1]._menuitem.setState_(1)
+            self._mic_menu_items[selected_name][2]._menuitem.setState_(1)
         else:
-            self._mic_menu_items["System (Standard)"][1]._menuitem.setState_(1)
+            self._mic_menu_items["System (Standard)"][2]._menuitem.setState_(1)
             selected_name = "System (Standard)"
             device_idx = None
         return selected_name, device_idx
@@ -2173,7 +2229,6 @@ end tell"""])
         """Aktualisiert die Mikrofonliste (neue Geräte hinzufügen, verschwundene entfernen)."""
         if not self._mic_refresh_lock.acquire(blocking=False):
             return
-        import collections as _co
         try:
             previous_signature = self._last_input_devices_signature
             previous_default_id = self._last_system_input_device_id
@@ -2184,46 +2239,25 @@ end tell"""])
                 except Exception as e:
                     logging.debug(f"PortAudio-Refresh in _refresh_mic_menu fehlgeschlagen: {e}")
             current = {
-                _normalize_device_name(name): idx
-                for idx, name in _dedupe_input_devices(_list_input_devices())
+                _normalize_device_name(name): (device_id, idx)
+                for device_id, idx, name in _dedupe_input_devices(_list_input_devices())
             }
 
-            # Index aktualisieren (kann sich nach Reconnect ändern)
-            for name, idx in current.items():
-                if name in self._mic_menu_items:
-                    old_idx, item = self._mic_menu_items[name]
-                    if old_idx != idx:
-                        self._mic_menu_items[name] = (idx, item)
-                        if self._mic_device_name == name:
-                            self._mic_device_idx = idx
+            if self._mic_device_name and self._mic_device_name not in current:
+                self._mic_follow_system = True
+                self._mic_device_name = None
+                self._mic_device_idx = None
 
-            # Neue Geräte hinzufügen – direkt hinter letztem bekannten Mic-Eintrag
-            for name, idx in current.items():
-                if name not in self._mic_menu_items:
-                    item = rumps.MenuItem(name, callback=self._on_mic_select)
-                    last_item = list(self._mic_menu_items.values())[-1][1]
-                    pos = self.menu._menu.indexOfItem_(last_item._menuitem) + 1
-                    self.menu._menu.insertItem_atIndex_(item._menuitem, pos)
-                    _co.OrderedDict.__setitem__(self.menu, name, item)
-                    self._mic_menu_items[name] = (idx, item)
-                    if name == self._mic_device_name:
-                        self._mic_device_idx = idx
-
-            # Verschwundene Geräte entfernen
-            for name in list(self._mic_menu_items.keys()):
-                if name == "System (Standard)":
-                    continue
-                if name not in current:
-                    if name in self.menu:
-                        del self.menu[name]
-                    del self._mic_menu_items[name]
-                    if self._mic_device_name == name:
-                        self._mic_follow_system = True
-                        self._mic_device_name = None
-                        self._mic_device_idx  = None
+            self._rebuild_mic_menu_section(current)
+            self._purge_duplicate_mic_menu_titles()
 
             current_default_id = self._get_system_default_input_device_id()
-            current_signature = tuple(sorted(current.items()))
+            current_signature = tuple(
+                sorted(
+                    (name, device_id, idx)
+                    for name, (device_id, idx) in current.items()
+                )
+            )
             devices_changed = current_signature != previous_signature
             default_changed = current_default_id != previous_default_id
 
@@ -2325,7 +2359,7 @@ end tell"""])
     def _on_mic_select(self, sender):
         name = sender.title
         if name in self._mic_menu_items:
-            idx, item = self._mic_menu_items[name]
+            _, idx, _ = self._mic_menu_items[name]
             self._mic_follow_system = (name == "System (Standard)")
             self._mic_device_idx  = None if self._mic_follow_system else idx
             self._mic_device_name = None if self._mic_follow_system else name
