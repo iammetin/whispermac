@@ -515,7 +515,7 @@ class _AppMenuDelegate(AppKit.NSObject):
     def menuWillOpen_(self, menu):
         if hasattr(self, '_app'):
             self._app._menu_is_open = True
-            self._app._refresh_mic_menu()
+            self._app._refresh_mic_menu(refresh_portaudio=False)
 
     def menuDidClose_(self, menu):
         if hasattr(self, '_app'):
@@ -2072,7 +2072,9 @@ end tell"""])
             old_signature,
             current_signature,
         )
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._refresh_mic_menu)
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+            lambda: self._refresh_mic_menu(refresh_portaudio=True)
+        )
 
     def _get_portaudio_default_input_index(self):
         try:
@@ -2167,7 +2169,7 @@ end tell"""])
                 self._save_settings()
                 break
 
-    def _refresh_mic_menu(self):
+    def _refresh_mic_menu(self, refresh_portaudio=False):
         """Aktualisiert die Mikrofonliste (neue Geräte hinzufügen, verschwundene entfernen)."""
         if not self._mic_refresh_lock.acquire(blocking=False):
             return
@@ -2175,7 +2177,7 @@ end tell"""])
         try:
             previous_signature = self._last_input_devices_signature
             previous_default_id = self._last_system_input_device_id
-            if not self._is_recording:
+            if refresh_portaudio and not self._is_recording:
                 try:
                     sd._terminate()
                     sd._initialize()
