@@ -648,6 +648,11 @@ class WhisperMacApp(rumps.App):
         self._transcription_seq  = 0   # Jeder fn-Druck erhöht diesen Zähler
         self._live_state_lock = threading.Lock()
         self._live_session    = None
+        self._pasteboard_lock = threading.Lock()
+        self._paste_generation = 0
+        self._pasteboard_saved_snapshot = None
+        self._paste_restore_event = threading.Event()
+        self._paste_restore_event.set()
         self._cleanup_lock    = threading.Lock()
         self._did_cleanup     = False
         self._shortcuts_win    = ShortcutsWindowController.alloc().init()
@@ -925,6 +930,8 @@ class WhisperMacApp(rumps.App):
     _LIVE_PAUSE_FINALIZE_SECONDS = 0.35
     _LIVE_LLM_MIN_WORDS       = 8
     _RELEASE_POST_ROLL_SECONDS = 0.5
+    _PASTE_PREPARE_DELAY_SECONDS = 0.04
+    _CLIPBOARD_RESTORE_DELAY_SECONDS = 0.75
     _TERMINAL_BUNDLE_IDS = {
         "com.apple.Terminal",
         "com.googlecode.iterm2",
@@ -1608,6 +1615,7 @@ class WhisperMacApp(rumps.App):
                 history_text = self._finalize_live_session(my_seq, final_text)
                 if history_text:
                     self._add_to_history(history_text)
+                self._wait_for_clipboard_restore()
             else:
                 text = self._transcribe_audio(audio, retry_lowercase=True)
                 if text and not self._is_hallucination(text) and self._ki_korrektur:
@@ -1732,32 +1740,63 @@ class WhisperMacApp(rumps.App):
         if items:
             pb.writeObjects_(items)
 
-    def _restore_clipboard_if_unchanged(self, pb, expected_change_count: int, saved_snapshot):
+    def _restore_clipboard_if_unchanged(self, pb, expected_change_count: int, saved_snapshot, paste_generation: int):
         try:
-            if int(pb.changeCount()) != expected_change_count:
-                return
-            self._restore_pasteboard(pb, saved_snapshot)
+            with self._pasteboard_lock:
+                if paste_generation != self._paste_generation:
+                    return
+                if int(pb.changeCount()) != expected_change_count:
+                    self._pasteboard_saved_snapshot = None
+                    self._paste_restore_event.set()
+                    return
+                self._restore_pasteboard(pb, saved_snapshot)
+                self._pasteboard_saved_snapshot = None
+                self._paste_restore_event.set()
         except Exception as e:
             logging.debug(f"Clipboard-Wiederherstellung fehlgeschlagen: {e}")
+            self._paste_restore_event.set()
+
+    def _wait_for_clipboard_restore(self):
+        self._paste_restore_event.wait(self._CLIPBOARD_RESTORE_DELAY_SECONDS + 0.3)
 
     def _paste_plain_text(self, text: str, pb) -> bool:
         try:
-            saved_snapshot = self._snapshot_pasteboard(pb)
-            pb.clearContents()
-            pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
-            whisper_change_count = int(pb.changeCount())
-            time.sleep(0.02)
-            # Cmd+V direkt via CGEvent – gleiche HID-Pipeline wie alle anderen Key-Events.
-            # Funktioniert zuverlässig in iFrames und Browser-Editoren, wo osascript versagt.
-            down = CGEventCreateKeyboardEvent(None, 9, True)   # V
-            CGEventSetFlags(down, kCGEventFlagMaskCommand)
-            CGEventPost(kCGHIDEventTap, down)
-            up = CGEventCreateKeyboardEvent(None, 9, False)
-            CGEventSetFlags(up, kCGEventFlagMaskCommand)
-            CGEventPost(kCGHIDEventTap, up)
+            with self._pasteboard_lock:
+                if self._pasteboard_saved_snapshot is None:
+                    self._pasteboard_saved_snapshot = self._snapshot_pasteboard(pb)
+                saved_snapshot = self._pasteboard_saved_snapshot
+                pb.clearContents()
+                pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
+                whisper_change_count = int(pb.changeCount())
+                self._paste_generation += 1
+                paste_generation = self._paste_generation
+                self._paste_restore_event.clear()
+                time.sleep(self._PASTE_PREPARE_DELAY_SECONDS)
+
+                # Wenn eine andere App das Clipboard genau jetzt geändert hat,
+                # nicht Cmd+V senden. Sonst könnten wir fremde Inhalte einfügen.
+                if int(pb.changeCount()) != whisper_change_count or self._clipboard_string(pb) != text:
+                    logging.warning("Paste abgebrochen: Clipboard wurde vor Cmd+V verändert")
+                    self._paste_restore_event.set()
+                    return False
+
+                # Cmd+V direkt via CGEvent – gleiche HID-Pipeline wie alle anderen Key-Events.
+                # Funktioniert zuverlässig in iFrames und Browser-Editoren, wo osascript versagt.
+                down = CGEventCreateKeyboardEvent(None, 9, True)   # V
+                CGEventSetFlags(down, kCGEventFlagMaskCommand)
+                CGEventPost(kCGHIDEventTap, down)
+                up = CGEventCreateKeyboardEvent(None, 9, False)
+                CGEventSetFlags(up, kCGEventFlagMaskCommand)
+                CGEventPost(kCGHIDEventTap, up)
+
             def _restore():
-                time.sleep(0.12)
-                self._restore_clipboard_if_unchanged(pb, whisper_change_count, saved_snapshot)
+                time.sleep(self._CLIPBOARD_RESTORE_DELAY_SECONDS)
+                self._restore_clipboard_if_unchanged(
+                    pb,
+                    whisper_change_count,
+                    saved_snapshot,
+                    paste_generation,
+                )
             threading.Thread(target=_restore, daemon=True).start()
             return True
         except Exception as e:
@@ -1858,24 +1897,7 @@ class WhisperMacApp(rumps.App):
 
     def _insert_text(self, text: str):
         pb = AppKit.NSPasteboard.generalPasteboard()
-        saved_snapshot = self._snapshot_pasteboard(pb)
-
-        pb.clearContents()
-        pb.setString_forType_(text, AppKit.NSPasteboardTypeString)
-        whisper_change_count = int(pb.changeCount())
-
-        time.sleep(0.02)
-        down = CGEventCreateKeyboardEvent(None, 9, True)   # Cmd+V
-        CGEventSetFlags(down, kCGEventFlagMaskCommand)
-        CGEventPost(kCGHIDEventTap, down)
-        up = CGEventCreateKeyboardEvent(None, 9, False)
-        CGEventSetFlags(up, kCGEventFlagMaskCommand)
-        CGEventPost(kCGHIDEventTap, up)
-
-        def _restore():
-            time.sleep(0.12)
-            self._restore_clipboard_if_unchanged(pb, whisper_change_count, saved_snapshot)
-        threading.Thread(target=_restore, daemon=True).start()
+        self._paste_plain_text(text, pb)
 
     # ── Verlauf ───────────────────────────────────────────────────────────
 
