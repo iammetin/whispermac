@@ -83,13 +83,13 @@ from workflows_window import WorkflowsWindowController
 if getattr(sys, "frozen", False):
     _MODELS_DIR        = os.path.expanduser("~/WhisperMac/models/whisper-cpp")
     WHISPER_SERVER_BIN = os.path.expanduser("~/WhisperMac/vendor/whisper.cpp-runtime/build/bin/whisper-server")
-    CORRECTOR_PATH     = os.path.expanduser("~/WhisperMac/models/llm")
+    CORRECTOR_PATH     = os.path.expanduser("~/WhisperMac/models/Gemma-E2B-MTP")
     MENUBAR_ICON       = os.path.expanduser("~/WhisperMac/Assets/menubar.png")
 else:
     BASE_DIR           = os.path.dirname(os.path.abspath(__file__))
     _MODELS_DIR        = os.path.join(BASE_DIR, "models", "whisper-cpp")
     WHISPER_SERVER_BIN = os.path.join(BASE_DIR, "vendor", "whisper.cpp-runtime", "build", "bin", "whisper-server")
-    CORRECTOR_PATH     = os.path.join(BASE_DIR, "models", "llm")
+    CORRECTOR_PATH     = os.path.join(BASE_DIR, "models", "Gemma-E2B-MTP")
     MENUBAR_ICON       = os.path.join(BASE_DIR, "Assets", "menubar.png")
 
 def _require_file(path: str, label: str) -> str:
@@ -756,12 +756,8 @@ class WhisperMacApp(rumps.App):
         for item in self._history_items:
             item._menuitem.setHidden_(True)
 
-        # KI-Korrektur-Einträge deaktiviert (Logik vorhanden, aktuell nicht genutzt)
-        self._ki_korrektur = False
-        self._ki_item._menuitem.setHidden_(True)
-        self._ki_auswahl_item._menuitem.setHidden_(True)
-
         # Häkchen bei gespeicherter Auswahl setzen
+        self._ki_item._menuitem.setState_(1 if self._ki_korrektur else 0)
         self._lang_menu_items[self.language]._menuitem.setState_(1)
         self._translate_menu_items[self._translate_to]._menuitem.setState_(1)
         if self._live_transcription:
