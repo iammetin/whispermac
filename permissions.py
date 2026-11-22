@@ -2,7 +2,10 @@
 Berechtigungsprüfung und Onboarding-Fenster für WhisperMac.
 Prüft Mikrofon + Bedienungshilfen und führt den Nutzer durch den Prozess.
 """
+import logging
+import os
 import subprocess
+import sys
 import threading
 import time
 
@@ -75,6 +78,38 @@ def request_microphone(callback):
         callback(False)
 
 
+def restart_application():
+    """Startet einen neuen Prozess, sobald die aktuelle App sauber beendet ist."""
+    if getattr(sys, "frozen", False):
+        bundle_path = str(AppKit.NSBundle.mainBundle().bundlePath())
+        if not bundle_path.endswith(".app"):
+            raise RuntimeError("WhisperMac-App konnte nicht gefunden werden.")
+        command = ["/usr/bin/open", "-n", bundle_path]
+    else:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
+        command = [sys.executable, script, *sys.argv[1:]]
+
+    # Separater Helfer wartet auf das Prozessende. Ein sofortiges `open`
+    # würde sonst unter Umständen nur die noch laufende App aktivieren.
+    helper = subprocess.Popen(
+        ["/bin/sh", "-c",
+         'while /bin/kill -0 "$1" 2>/dev/null; do /bin/sleep 0.1; done; '
+         'shift; exec "$@"',
+         "whispermac-restart", str(os.getpid()), *command],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        # Die bestehende applicationWillTerminate-Behandlung räumt Audio und
+        # den Whisper-Server auf, bevor der Helfer die neue Instanz startet.
+        AppKit.NSApplication.sharedApplication().terminate_(None)
+    except Exception:
+        helper.terminate()
+        raise
+
+
 # ── Button-Handler (NSObject-Subklasse für target-action) ────────────────────
 
 class _BtnHandler(AppKit.NSObject):
@@ -103,6 +138,8 @@ class PermissionsWindow:
         self._rows = {}       # key → (status_label, button, handler)
         self._polling = False
         self._handlers = []   # starke Referenzen auf Handler
+        self._accessibility_requested = False
+        self._restarting = False
 
     def show(self):
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(self._build)
@@ -196,6 +233,8 @@ class PermissionsWindow:
 
     def _update(self):
         """Aktualisiert Status-Labels und Buttons."""
+        if self._restarting:
+            return
         states = {"mic": mic_granted(), "acc": accessibility_granted()}
 
         for key, granted in states.items():
@@ -209,6 +248,10 @@ class PermissionsWindow:
             else:
                 status_lbl.setStringValue_("✗ Fehlt")
                 status_lbl.setTextColor_(NSColor.systemRedColor())
+                btn.setTitle_(
+                    "Neu starten" if key == "acc" and self._accessibility_requested
+                    else "Erteilen →"
+                )
                 btn.setHidden_(False)
 
         if all(states.values()):
@@ -240,7 +283,29 @@ class PermissionsWindow:
         request_microphone(_cb)
 
     def _action_acc(self):
-        subprocess.run(["open", ACC_URL])
+        if not self._accessibility_requested:
+            subprocess.run(["open", ACC_URL], check=True)
+            self._accessibility_requested = True
+            self._update()
+            return
+
+        if self._restarting:
+            return
+        self._restarting = True
+        self._polling = False
+        _, btn = self._rows["acc"]
+        btn.setEnabled_(False)
+        try:
+            restart_application()
+        except Exception:
+            logging.exception("WhisperMac konnte nicht neu gestartet werden")
+            self._restarting = False
+            btn.setEnabled_(True)
+            self._start_polling()
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Neustart fehlgeschlagen")
+            alert.setInformativeText_("Bitte beende WhisperMac und öffne die App erneut.")
+            alert.runModal()
 
 
 # ── Öffentliche Funktion ──────────────────────────────────────────────────────

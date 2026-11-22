@@ -1673,33 +1673,6 @@ class WhisperMacApp(rumps.App):
             logging.debug(f"_get_char_before_cursor exception: {e}")
             return ""
 
-    def _insert_plain_text(self, text: str) -> bool:
-        try:
-            from ApplicationServices import (
-                AXUIElementCreateSystemWide,
-                AXUIElementCopyAttributeValue,
-                AXUIElementSetAttributeValue,
-            )
-
-            system = AXUIElementCreateSystemWide()
-            err, focused = AXUIElementCopyAttributeValue(system, "AXFocusedUIElement", None)
-            if err != 0 or focused is None:
-                logging.debug(f"AX insert skipped: focused err={err}")
-                return False
-
-            err = AXUIElementSetAttributeValue(
-                focused,
-                "AXSelectedText",
-                AppKit.NSString.stringWithString_(text),
-            )
-            if err == 0:
-                logging.debug(f"AX insert ok len={len(text)}")
-                return True
-            logging.debug(f"AX insert failed err={err}")
-        except Exception as e:
-            logging.debug(f"AX insert exception: {e}")
-        return False
-
     def _clipboard_string(self, pb):
         try:
             return pb.stringForType_(AppKit.NSPasteboardTypeString)
@@ -1846,12 +1819,12 @@ class WhisperMacApp(rumps.App):
                 last_seg     = seg_text
                 pending_wrap = None
             elif seg_text:
-                if self._insert_plain_text(seg_text):
-                    inserted_any = True
-                elif self._paste_plain_text(seg_text, pb):
+                # Wie im Live-Modus per Cmd+V einfügen. Browser-Editoren können
+                # AXSelectedText als erfolgreich melden, ohne den Text zu übernehmen.
+                if self._paste_plain_text(seg_text, pb):
                     inserted_any = True
                 else:
-                    logging.warning("Segment konnte weder per AX noch per Paste eingefügt werden")
+                    logging.warning("Segment konnte nicht per Paste eingefügt werden")
                     return False
                 last_seg = seg_text
 

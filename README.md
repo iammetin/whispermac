@@ -100,6 +100,37 @@ If the matching encoder is missing, WhisperMac now generates it automatically on
 ./build.sh   # builds the .app, installs to /Applications and launches it
 ```
 
+No signing certificate or keychain setup is required. By default the build uses
+an existing `WhisperMac Local Signing` identity if available, otherwise an ad-hoc
+signature. With ad-hoc signing, changed builds may require granting macOS privacy
+permissions again. You can explicitly choose ad-hoc signing with
+`WHISPERMAC_SIGN_IDENTITY=- ./build.sh`.
+
+Optionally, for stable permissions across local rebuilds, set up a persistent
+local signing identity once:
+
+```bash
+./scripts/setup_codesigning.sh
+```
+
+This creates a code-signing certificate and private key in your default user
+keychain, with trust limited to code signing. Keep this identity for future
+builds. Each Mac creates its own independent key; matching certificate names do
+not share keys or permissions. No private key is stored in this repository, and
+the normal build does not import certificates or change keychain trust.
+Alternatively, set `WHISPERMAC_SIGN_IDENTITY` to an existing Apple code signing
+identity. If an explicitly selected identity is unavailable, the build stops
+before changing the installed app.
+
+After switching from an ad-hoc signature to this identity, reauthorize WhisperMac
+once in macOS Privacy & Security. Later builds signed with the same identity
+should retain that authorization. Replacing or deleting the signing identity can
+require authorization again. This local certificate is for use on your own Mac;
+it does not replace Developer ID signing and notarization for distribution.
+
+Python-only changes do not require rebuilding: the launcher reads this project's
+Python files directly, so quit and reopen the installed app to load changes.
+
 For development without building:
 
 ```bash

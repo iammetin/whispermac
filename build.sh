@@ -7,6 +7,30 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="WhisperMac"
 APP_OUT="$SCRIPT_DIR/dist/$APP_NAME.app"
+SIGN_IDENTITY="${WHISPERMAC_SIGN_IDENTITY:-auto}"
+
+# Feste lokale Identität verwenden, falls eingerichtet. Andere Nutzer können
+# ohne Zertifikat bauen; der Build selbst ändert niemals den Schlüsselbund.
+if [ "$SIGN_IDENTITY" = "auto" ]; then
+    SIGN_IDENTITIES=$(security find-identity -v -p codesigning)
+    if [[ "$SIGN_IDENTITIES" == *'"WhisperMac Local Signing"'* ]]; then
+        SIGN_IDENTITY="WhisperMac Local Signing"
+    else
+        SIGN_IDENTITY="-"
+    fi
+elif [ "$SIGN_IDENTITY" != "-" ]; then
+    # Explizit gewählte Identitäten vor dem Beenden/Ersetzen der App prüfen.
+    SIGN_IDENTITIES=$(security find-identity -v -p codesigning)
+    if [[ "$SIGN_IDENTITIES" != *"$SIGN_IDENTITY"* ]]; then
+        echo "❌ Signieridentität nicht verfügbar: $SIGN_IDENTITY"
+        exit 1
+    fi
+fi
+if [ "$SIGN_IDENTITY" = "-" ]; then
+    echo "ℹ️  Baue ohne Schlüsselbund-Einrichtung (Ad-hoc-Signatur)."
+    echo "   Nach geänderten Builds können macOS-Freigaben erneut nötig sein."
+    echo "   Optional für stabile Freigaben: ./scripts/setup_codesigning.sh"
+fi
 
 # ── App beenden falls sie läuft ───────────────────────────────────────────────
 if pgrep -x "$APP_NAME" > /dev/null 2>&1; then
@@ -114,9 +138,10 @@ clang /tmp/whispermac_launcher.c \
     -Wl,-rpath,"$PY_RPATH" \
     -w
 
-# ── Ad-hoc Signatur (damit macOS die App startet) ─
+# ── App signieren (feste Identität, falls eingerichtet; sonst ad hoc) ─
 echo "🔏 Signiere App..."
-codesign --force --deep --sign - "$APP_OUT"
+codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP_OUT"
+codesign --verify --strict --verbose=2 "$APP_OUT"
 
 # ── Direkt nach /Applications installieren ───────────────────────────────
 echo "📲 Installiere nach /Applications..."
