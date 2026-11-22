@@ -22,6 +22,7 @@ WhisperMac lives in your menu bar and lets you dictate into any app, at any time
 - **Hallucination filter** — common Whisper hallucinations ("Danke schön.", "Thanks for watching.", …) are silently discarded
 - **History** — last 5 transcriptions accessible from the menu bar for quick re-paste
 - **Microphone selection** — pick any input device; list refreshes automatically when Bluetooth headphones connect
+- **Sound settings** — independently enable and choose macOS system sounds for recording start and model readiness; preview selections and save them automatically
 - **Project-local runtime** — `whisper.cpp` server binary, libraries, Core ML encoder and model all live inside this project
 - **Hotkeys**
   - `F13` tap — delete last word

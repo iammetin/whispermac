@@ -73,6 +73,7 @@ from permissions import ensure_permissions
 from recorder import AudioRecorder
 from shortcuts import apply_shortcuts, load_shortcuts
 from shortcuts_window import ShortcutsWindowController
+from sound_settings import SoundFeedback, SoundSettingsWindowController
 from corrector import TextCorrector
 from ki_window import PromptManagerWindowController, load_ki_settings
 from transcriber import Transcriber
@@ -608,6 +609,7 @@ class WhisperMacApp(rumps.App):
         self.language         = self._load_setting("language", None, {c for c,_ in LANG_OPTIONS})
         self._translate_to    = self._load_setting("translate_to", None, {c for c,_ in TRANSLATE_OPTIONS})
         self._live_transcription = bool(self._load_raw_setting("live_transcription", True))
+        self._sounds = SoundFeedback(self._load_raw_setting("sounds", {}))
         self._restore_live_transcription_after_translate = False
         self._ki_korrektur, ki_live_prompt, ki_auswahl_prompt = load_ki_settings()
         self.corrector.system_prompt = ki_live_prompt
@@ -657,6 +659,9 @@ class WhisperMacApp(rumps.App):
         self._did_cleanup     = False
         self._shortcuts_win    = ShortcutsWindowController.alloc().init()
         self._workflows_win    = WorkflowsWindowController.alloc().init()
+        self._sound_settings_win = SoundSettingsWindowController.alloc().init()
+        self._sound_settings_win._feedback = self._sounds
+        self._sound_settings_win._on_change = self._save_settings
         self._ki_live_win      = PromptManagerWindowController.alloc().initWithMode_("live")
         self._ki_live_win._on_save    = self._on_ki_live_saved
         self._ki_auswahl_win   = PromptManagerWindowController.alloc().initWithMode_("auswahl")
@@ -733,6 +738,7 @@ class WhisperMacApp(rumps.App):
                      rumps.MenuItem("Kürzel…  (F15)",         callback=self._on_shortcuts),
                      rumps.MenuItem("Workflows…  (F15 F15)", callback=self._on_workflows),
                      None,
+                     rumps.MenuItem("Toneinstellungen…", callback=self._on_sound_settings),
                      rumps.MenuItem("Beenden", callback=self._on_quit)])
         self.menu = menu
 
@@ -855,6 +861,7 @@ class WhisperMacApp(rumps.App):
         # Kurz "Bereit" neben dem Icon anzeigen, dann wieder ausblenden
         def _show_ready():
             self.title = " Bereit"
+            self._sounds.play("model_ready")
         def _hide_ready():
             self.title = ""
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show_ready)
@@ -1383,11 +1390,13 @@ class WhisperMacApp(rumps.App):
                         def _handle_f15():
                             # Alles auf dem Main Thread – AppKit-Zugriffe nur hier
                             if (self._shortcuts_win.is_open() or self._workflows_win.is_open()
-                                    or self._ki_live_win.is_open() or self._ki_auswahl_win.is_open()):
+                                    or self._ki_live_win.is_open() or self._ki_auswahl_win.is_open()
+                                    or self._sound_settings_win.is_open()):
                                 self._shortcuts_win.close()
                                 self._workflows_win.close()
                                 self._ki_live_win.close()
                                 self._ki_auswahl_win.close()
+                                self._sound_settings_win.close()
                                 return
                             if self._f15_tap_timer is not None:
                                 # Zweiter Klick innerhalb 350ms → Workflows öffnen
@@ -1478,16 +1487,8 @@ class WhisperMacApp(rumps.App):
 
     # ── Aufnahme-Workflow ─────────────────────────────────────────────────
 
-    _DICTATION_SOUND = (
-        "/System/Library/PrivateFrameworks/SpeechObjects.framework"
-        "/Versions/A/Frameworks/DictationServices.framework"
-        "/Versions/A/Resources/DefaultRecognitionSound.aiff"
-    )
-
     def _play_start_sound(self):
-        snd = AppKit.NSSound.soundNamed_("Funk")
-        if snd:
-            snd.play()
+        self._sounds.play("recording_start")
 
     def _on_fn_press(self):
         now = time.time()
@@ -2093,6 +2094,11 @@ end tell"""])
             self._workflows_win.show
         )
 
+    def _on_sound_settings(self, sender):
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+            self._sound_settings_win.show
+        )
+
     # ── Sprache ───────────────────────────────────────────────────────────
 
     def _load_raw_setting(self, key, default):
@@ -2123,6 +2129,7 @@ end tell"""])
                 "translate_to": self._translate_to,
                 "live_transcription": self._live_transcription,
                 "ki_korrektur": self._ki_korrektur,
+                "sounds": self._sounds.snapshot(),
             })
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
